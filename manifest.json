@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "CDN Analyzer",
+  "version": "1.0",
+  "description": "Analyzes CDN usage and network performance in real-time.",
+  "permissions": [
+    "webRequest",
+    "storage",
+    "activeTab",
+    "scripting",
+    "tabs"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "CDN Analyzer"
+  }
+}
