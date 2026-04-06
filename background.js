@@ -1,147 +1,108 @@
-// Start times for current requests to calculate response timing
-let requestStartTimes = {};
-
-// Clean up state when a tab is closed or updated
-chrome.tabs.onRemoved.addListener((tabId) => {
-    chrome.storage.local.remove(`tab_${tabId}`);
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request.action === 'analyze') {
+        analyzeUrl(request.url).then(data => {
+            sendResponse({ data: data });
+        }).catch(err => {
+            sendResponse({ error: err.message || "Request failed" });
+        });
+        return true; // Keep message channel open for async response
+    }
 });
 
-chrome.webRequest.onBeforeRequest.addListener(
-    (details) => {
-        // Reset tab data for new page load
-        if (details.type === 'main_frame' && details.tabId !== -1) {
-            const initData = {
-                cdnProvider: 'Unknown',
-                cacheStatus: 'UNKNOWN',
-                totalLoadTime: 0,
-                loadTimesCount: 0,
-                avgLoadTime: 0,
-                totalRequests: 0,
-                errors: 0,
-                providers: {}
-            };
-            const dataObj = {};
-            dataObj[`tab_${details.tabId}`] = initData;
-            chrome.storage.local.set(dataObj);
-        }
-        requestStartTimes[details.requestId] = details.timeStamp;
-    },
-    { urls: ["<all_urls>"] }
-);
-
-// Capture headers, CDN info, and end time
-chrome.webRequest.onHeadersReceived.addListener(
-    (details) => {
-        const tabId = details.tabId;
-        if (tabId === -1) return; // ignore background requests
-
-        let duration = 0;
-        if (requestStartTimes[details.requestId]) {
-            duration = details.timeStamp - requestStartTimes[details.requestId];
-            delete requestStartTimes[details.requestId];
-        }
-
-        // Analyze headers
-        let cdn = 'Unknown';
-        let cache = 'UNKNOWN';
-        
-        if (details.responseHeaders) {
-            for (let header of details.responseHeaders) {
-                const name = header.name.toLowerCase();
-                const value = header.value.toLowerCase();
-                
-                // CDN Detection
-                if (name === 'server') {
-                    if (value.includes('cloudflare')) cdn = 'Cloudflare';
-                    else if (value.includes('akamai')) cdn = 'Akamai';
-                    else if (value.includes('fastly')) cdn = 'Fastly';
-                    else if (value.includes('cloudfront')) cdn = 'Amazon CloudFront';
-                }
-                if (name === 'x-amz-cf-id' || name === 'x-amz-cf-pop') cdn = 'Amazon CloudFront';
-                if (name === 'cf-ray') cdn = 'Cloudflare';
-                if (name === 'via') {
-                    if (value.includes('cloudfront')) cdn = 'Amazon CloudFront';
-                    else if (value.includes('akamai')) cdn = 'Akamai';
-                    else if (value.includes('fastly')) cdn = 'Fastly';
-                    else if (cdn === 'Unknown') cdn = `Via: ${header.value}`; // Generic fallback
-                }
-
-                // Cache Status Detection
-                if (name === 'x-cache' || name === 'cf-cache-status' || name === 'x-edge-result') {
-                    if (value.includes('hit')) cache = 'HIT';
-                    else if (value.includes('miss')) cache = 'MISS';
-                    else cache = value.toUpperCase();
-                }
-            }
-        }
-
-        // Use chrome.storage.local to update info
-        const key = `tab_${tabId}`;
-        chrome.storage.local.get(key, (res) => {
-            let data = res[key] || {
-                cdnProvider: 'Unknown',
-                cacheStatus: 'UNKNOWN',
-                totalLoadTime: 0,
-                loadTimesCount: 0,
-                avgLoadTime: 0,
-                totalRequests: 0,
-                errors: 0,
-                providers: {}
-            };
-
-            data.totalRequests++;
-            if (duration > 0) {
-                data.totalLoadTime += duration;
-                data.loadTimesCount++;
-                data.avgLoadTime = Math.round(data.totalLoadTime / data.loadTimesCount);
-            }
-
-            if (cdn !== 'Unknown') {
-                data.providers[cdn] = (data.providers[cdn] || 0) + 1;
-                // Primary CDN is the one with most requests
-                data.cdnProvider = Object.keys(data.providers).reduce((a, b) => data.providers[a] > data.providers[b] ? a : b);
-            }
-
-            // Keep best cache status we find or default to the last interesting one
-            if (data.cacheStatus === 'UNKNOWN' || cache === 'HIT' || cache === 'MISS') {
-                 if (cache !== 'UNKNOWN') data.cacheStatus = cache;
-            }
-            if (data.cacheStatus !== 'HIT' && cache === 'HIT') {
-                data.cacheStatus = 'HIT';
-            } else if (data.cacheStatus === 'UNKNOWN' && cache === 'MISS') {
-                data.cacheStatus = 'MISS';
-            }
-
-            console.log(`[Request] CDN: ${cdn}, Cache: ${cache}, Duration: ${duration.toFixed(2)}ms`);
-
-            let updateObj = {};
-            updateObj[key] = data;
-            chrome.storage.local.set(updateObj);
+async function analyzeUrl(url) {
+    const startTime = performance.now();
+    
+    // We use a GET request here because sometimes HEAD doesn't trigger cache the same way,
+    // but we can abort it if we only want headers. To keep it simple and accurate for size,
+    // we'll fetch the whole thing since it's an active load test.
+    let response;
+    try {
+        response = await fetch(url, {
+            method: 'GET',
+            cache: 'no-store' // don't use browser local cache to get true network hit/miss
         });
-    },
-    { urls: ["<all_urls>"] },
-    ["responseHeaders", "extraHeaders"]
-);
+    } catch(err) {
+        throw new Error("Network error or CORS blocked. Is the URL correct?");
+    }
 
-// Capture errors
-chrome.webRequest.onErrorOccurred.addListener(
-    (details) => {
-        const tabId = details.tabId;
-        if (tabId === -1) return;
+    const endTime = performance.now();
+    const duration = Math.round(endTime - startTime);
 
-        console.error(`[Request Error] ${details.url}`, details.error);
+    const headers = response.headers;
+    
+    // Extract required data
+    const status = response.status;
+    const domain = new URL(url).hostname;
+    
+    // Read headers
+    const serverValue = headers.get('server') || '';
+    const viaValue = headers.get('via') || '';
+    const cfRay = headers.get('cf-ray');
+    const amzCfId = headers.get('x-amz-cf-id');
+    const cacheHit = headers.get('x-cache') || headers.get('cf-cache-status') || headers.get('x-edge-result');
+    const contentLength = headers.get('content-length');
 
-        delete requestStartTimes[details.requestId];
+    // Detect CDN
+    let cdn = 'Unknown';
+    if (cfRay || serverValue.toLowerCase().includes('cloudflare')) {
+        cdn = 'Cloudflare';
+    } else if (amzCfId || serverValue.toLowerCase().includes('cloudfront') || viaValue.toLowerCase().includes('cloudfront')) {
+        cdn = 'AWS CloudFront';
+    } else if (serverValue.toLowerCase().includes('akamai') || viaValue.toLowerCase().includes('akamai')) {
+        cdn = 'Akamai';
+    } else if (serverValue.toLowerCase().includes('fastly') || viaValue.toLowerCase().includes('fastly')) {
+        cdn = 'Fastly';
+    } else if (headers.get('x-azure-ref')) {
+        cdn = 'Azure Front Door';
+    } else if (headers.get('x-edgeconnect-proxied')) {
+         cdn = 'Edgecast';
+    } else if (serverValue) {
+        // Fallback to server name if it's somewhat known
+        cdn = `Server: ${serverValue.split(' ')[0]}`;
+    }
 
-        const key = `tab_${tabId}`;
-        chrome.storage.local.get(key, (res) => {
-            if (res[key]) {
-                res[key].errors++;
-                let updateObj = {};
-                updateObj[key] = res[key];
-                chrome.storage.local.set(updateObj);
-            }
-        });
-    },
-    { urls: ["<all_urls>"] }
-);
+    // Cache parsing
+    let cacheStatus = 'UNKNOWN';
+    if (cacheHit) {
+        const lower = cacheHit.toLowerCase();
+        if (lower.includes('hit')) cacheStatus = 'HIT';
+        else if (lower.includes('miss')) cacheStatus = 'MISS';
+        else cacheStatus = cacheHit.toUpperCase();
+    }
+
+    // Edge Server Info
+    let edgeServer = serverValue;
+    if (cfRay) edgeServer = `CF-Ray: ${cfRay.split('-')[1] || cfRay}`;
+    if (amzCfId) edgeServer = `Amz-Id: ${amzCfId.substring(0, 10)}...`;
+
+    // Calculate Score (0-100)
+    // < 500ms = 90-100
+    // 500 - 1500ms = 70-89
+    // > 1500ms = < 70
+    let score = 100;
+    if (duration < 500) {
+        score = 100 - Math.floor((duration / 500) * 10); // 90-100
+    } else if (duration < 1500) {
+        score = 89 - Math.floor(((duration - 500) / 1000) * 19); // 70-89
+    } else if (duration <= 3000) {
+        score = 69 - Math.floor(((duration - 1500) / 1500) * 19); // 50-69
+    } else {
+        score = Math.max(0, 49 - Math.floor((duration - 3000) / 100)); // < 50
+    }
+
+    // Penalty for bad status code
+    if (status >= 400) {
+        score = Math.max(0, score - 30);
+    }
+
+    return {
+        domain: domain,
+        cdn: cdn,
+        server: edgeServer || 'Unknown',
+        status: status,
+        cache: cacheStatus,
+        size: contentLength ? parseInt(contentLength, 10) : null,
+        time: duration,
+        score: score
+    };
+}
