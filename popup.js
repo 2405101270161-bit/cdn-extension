@@ -2,20 +2,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const analyzeBtn = document.getElementById('analyze-btn');
     const loadTestBtn = document.getElementById('load-test-btn');
     const urlInput = document.getElementById('target-url');
-    const chips = document.querySelectorAll('.chip');
-    
+    urlInput.value = "";
+
     // UI Elements
     const errorMsg = document.getElementById('error-message');
     const loadingState = document.getElementById('loading-state');
     const dashboard = document.getElementById('results-dashboard');
-
-    // Quick link chips
-    chips.forEach(chip => {
-        chip.addEventListener('click', () => {
-            urlInput.value = chip.dataset.url;
-            analyzeUrl();
-        });
-    });
 
     analyzeBtn.addEventListener('click', analyzeUrl);
 
@@ -76,7 +68,11 @@ document.addEventListener('DOMContentLoaded', () => {
         // Send to background service worker
         chrome.runtime.sendMessage({ action: 'analyze', url: url }, (response) => {
             if (chrome.runtime.lastError) {
-                showError("Extension error: " + chrome.runtime.lastError.message);
+                let msg = chrome.runtime.lastError.message;
+                if (msg.includes("Receiving end does not exist")) {
+                    msg += " (Hint: Please click the 'Reload' icon for this extension in chrome://extensions to load the new background.js script)";
+                }
+                showError("Extension error: " + msg);
                 return;
             }
 
