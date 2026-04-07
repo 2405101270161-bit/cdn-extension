@@ -1,14 +1,12 @@
 {
   "manifest_version": 3,
-  "name": "CDN Analyzer",
+  "name": "CDN Analyzer Pro",
   "version": "1.0",
   "description": "Analyzes CDN usage and network performance in real-time.",
   "permissions": [
-    "webRequest",
     "storage",
     "activeTab",
-    "scripting",
-    "tabs"
+    "scripting"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -18,6 +16,6 @@
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "CDN Analyzer"
+    "default_title": "CDN Analyzer Pro"
   }
 }
