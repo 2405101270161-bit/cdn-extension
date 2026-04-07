@@ -182,3 +182,50 @@ footer {
     font-size: 0.7rem;
     color: var(--text-secondary);
 }
+
+/* Added Input Section Styles */
+.input-section {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 16px;
+}
+
+#urlInput {
+    flex: 1;
+    padding: 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--card-bg);
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    outline: none;
+    transition: border-color 0.2s;
+}
+
+#urlInput:focus {
+    border-color: var(--accent);
+}
+
+#analyze-btn {
+    padding: 10px 16px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, #38bdf8, #818cf8);
+    color: white;
+    font-weight: bold;
+    border: none;
+    cursor: pointer;
+    transition: opacity 0.2s, transform 0.1s;
+}
+
+#analyze-btn:not(:disabled):hover {
+    opacity: 0.9;
+}
+
+#analyze-btn:not(:disabled):active {
+    transform: scale(0.98);
+}
+
+#analyze-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}

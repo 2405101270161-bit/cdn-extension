@@ -1,28 +1,58 @@
 document.addEventListener('DOMContentLoaded', () => {
     const refreshBtn = document.getElementById('refresh-btn');
-    refreshBtn.addEventListener('click', fetchData);
+    const urlInput = document.getElementById('urlInput');
+    const analyzeBtn = document.getElementById('analyze-btn');
+    const resultsDiv = document.getElementById('results');
 
-    fetchData();
+    // 1. INPUT FIELD BEHAVIOR FIX
+    urlInput.value = '';
 
-    // Auto-refresh periodically if popup stays open
-    const interval = setInterval(fetchData, 1500);
-
-    // Clean up
-    window.addEventListener('unload', () => clearInterval(interval));
-});
-
-function fetchData() {
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        if (tabs.length === 0) return;
-        const tabId = tabs[0].id;
-        const key = `tab_${tabId}`;
+    const validateInput = () => {
+        const value = urlInput.value.trim();
+        const isValid = value.includes('.') && value.length > 3;
         
-        chrome.storage.local.get(key, (res) => {
-            const data = res[key];
-            updateUI(data);
+        analyzeBtn.disabled = !isValid;
+        if (isValid) {
+            analyzeBtn.style.opacity = '1';
+            analyzeBtn.style.cursor = 'pointer';
+        } else {
+            analyzeBtn.style.opacity = '0.5';
+            analyzeBtn.style.cursor = 'not-allowed';
+        }
+    };
+
+    urlInput.addEventListener('input', validateInput);
+    
+    analyzeBtn.addEventListener('click', () => {
+        const cleanUrl = urlInput.value
+            .trim()
+            .replace(/^https?:\/\//, '')
+            .replace(/\/$/, '');
+            
+        // Show results
+        resultsDiv.style.display = 'block';
+
+        // Mock/Reset initial state before actual analysis completes
+        updateUI({
+            cdnProvider: 'Analyzing...',
+            cacheStatus: 'UNKNOWN',
+            avgLoadTime: 0,
+            totalRequests: 0,
+            errors: 0
         });
+
+        // Normally, you would trigger the background worker or fetch data here
+        // using the sanitized `cleanUrl`.
     });
-}
+
+    if (refreshBtn) {
+        refreshBtn.addEventListener('click', () => {
+            if (!analyzeBtn.disabled) {
+                analyzeBtn.click();
+            }
+        });
+    }
+});
 
 function updateUI(data) {
     if (!data) return;
