@@ -1,168 +1,113 @@
 document.addEventListener('DOMContentLoaded', () => {
-    const analyzeBtn = document.getElementById('analyze-btn');
-    const loadTestBtn = document.getElementById('load-test-btn');
-    const urlInput = document.getElementById('target-url');
-    urlInput.value = "";
+    const urlInput = document.getElementById('urlInput');
+    const analyzeBtn = document.getElementById('analyzeBtn');
+    const refreshBtn = document.getElementById('refreshBtn');
+    const resultsArea = document.getElementById('resultsArea');
 
-    // UI Elements
-    const errorMsg = document.getElementById('error-message');
-    const loadingState = document.getElementById('loading-state');
-    const dashboard = document.getElementById('results-dashboard');
+    urlInput.value = '';
 
-    analyzeBtn.addEventListener('click', analyzeUrl);
-
-    // Optional Load Test functionality (UI only)
-    loadTestBtn.addEventListener('click', () => {
-        analyzeUrl(); // For now just reuse analyze
+    urlInput.addEventListener('input', () => {
+        const value = urlInput.value.trim();
+        const isValid = value.includes('.') && value.length > 3;
+        analyzeBtn.disabled = !isValid;
     });
 
-    // Handle enter key in input
-    urlInput.addEventListener('keypress', (e) => {
-        if (e.key === 'Enter') {
-            analyzeUrl();
-        }
-    });
+    async function analyze() {
+        if (!urlInput.value.trim()) return;
 
-    function showLoading() {
-        errorMsg.classList.add('hidden');
-        dashboard.classList.add('hidden');
-        loadingState.classList.remove('hidden');
-    }
+        const cleanUrl = urlInput.value
+            .trim()
+            .replace(/^https?:\/\//, '')
+            .replace(/\/$/, '');
 
-    function showError(msg) {
-        loadingState.classList.add('hidden');
-        dashboard.classList.add('hidden');
-        errorMsg.textContent = msg;
-        errorMsg.classList.remove('hidden');
-    }
-
-    function showDashboard() {
-        loadingState.classList.add('hidden');
-        errorMsg.classList.add('hidden');
-        dashboard.classList.remove('hidden');
-    }
-
-    function analyzeUrl() {
-        let url = urlInput.value.trim();
-        
-        if (!url) {
-            showError("Please enter a valid URL");
-            return;
-        }
-
-        // Auto prepend https if missing
-        if (!url.startsWith('http://') && !url.startsWith('https://')) {
-            url = 'https://' + url;
-            urlInput.value = url;
-        }
+        showLoadingUI();
 
         try {
-            new URL(url);
-        } catch(e) {
-            showError("Invalid URL format");
-            return;
+            const res = await fetch(`http://localhost:3000/analyze?url=${cleanUrl}`);
+            const json = await res.json();
+
+            const data = {
+                url: json.url,
+                score: json.loadTime < 500 ? 95 : 75,
+                cdnProvider: json.cdn,
+                edgeServer: (json.headers || {}).server || "Unknown",
+                statusCode: json.status,
+                cacheStatus: (json.headers || {})["cf-cache-status"] || "UNKNOWN",
+                contentSize: "-",
+                loadTime: json.loadTime,
+                ttfb: Math.round(json.loadTime / 2),
+                protocol: "HTTP/2",
+                tlsVersion: "TLS 1.3"
+            };
+
+            showResults(data);
+
+        } catch (err) {
+            console.error(err);
+            showError("Backend not running. Start server.");
         }
-
-        showLoading();
-
-        // Send to background service worker
-        chrome.runtime.sendMessage({ action: 'analyze', url: url }, (response) => {
-            if (chrome.runtime.lastError) {
-                let msg = chrome.runtime.lastError.message;
-                if (msg.includes("Receiving end does not exist")) {
-                    msg += " (Hint: Please click the 'Reload' icon for this extension in chrome://extensions to load the new background.js script)";
-                }
-                showError("Extension error: " + msg);
-                return;
-            }
-
-            if (!response) {
-                showError("Unknown error occurred");
-                return;
-            }
-
-            if (response.error) {
-                showError("Failed to analyze: " + response.error);
-                return;
-            }
-
-            updateDashboard(response.data);
-            showDashboard();
-        });
     }
 
-    function updateDashboard(data) {
-        // Score logic
-        const circle = document.getElementById('score-circle');
-        const scoreNum = document.getElementById('score-number');
-        const scoreGrade = document.getElementById('score-grade');
-        
-        let score = data.score;
-        scoreNum.textContent = score;
+    analyzeBtn.addEventListener('click', analyze);
 
-        // Calculate progress circle offset (314 is full circumference)
-        const offset = 314 - (score / 100) * 314;
-        
-        // Timeout to allow transition to trigger
-        setTimeout(() => {
-            circle.style.strokeDashoffset = offset;
-        }, 50);
+    refreshBtn.onclick = () => {
+        resultsArea.innerHTML = "";
+        urlInput.value = "";
+        analyzeBtn.disabled = true;
+    };
 
-        // Score colors
-        let color = 'var(--success)';
-        if (score >= 90) {
-            color = 'var(--success)';
-            scoreGrade.textContent = "A Excellent";
-            scoreGrade.style.color = color;
-        } else if (score >= 70) {
-            color = 'var(--accent-secondary)'; // Blue
-            scoreGrade.textContent = "B Good";
-            scoreGrade.style.color = color;
-            circle.style.stroke = color;
-        } else if (score >= 50) {
-            color = 'var(--warning)';
-            scoreGrade.textContent = "C Average";
-            scoreGrade.style.color = color;
-            circle.style.stroke = color;
-        } else {
-            color = 'var(--error)';
-            scoreGrade.textContent = "Poor";
-            scoreGrade.style.color = color;
-            circle.style.stroke = color;
-        }
+    function showError(msg) {
+        resultsArea.innerHTML = `<div class="error-msg" style="color: var(--error); text-align: center; padding: 20px;">${msg}</div>`;
+    }
 
-        // Overview metrics
-        document.getElementById('res-website').textContent = data.domain || '-';
-        document.getElementById('res-website').title = data.domain || '';
-        
-        document.getElementById('res-cdn').textContent = data.cdn || 'Unknown';
-        
-        document.getElementById('res-server').textContent = data.server || 'N/A';
-        document.getElementById('res-server').title = data.server || '';
-        
-        document.getElementById('res-status').textContent = data.status || '-';
-        
-        // Cache Badge
-        const cacheEl = document.getElementById('res-cache');
-        cacheEl.textContent = data.cache || 'UNKNOWN';
-        cacheEl.className = 'metric-value badge';
-        if (data.cache === 'HIT') cacheEl.classList.add('hit');
-        else if (data.cache === 'MISS') cacheEl.classList.add('miss');
-        else cacheEl.classList.add('unknown');
+    function showLoadingUI() {
+        const tpl = document.getElementById('loadingTemplate').content.cloneNode(true);
+        resultsArea.innerHTML = '';
+        resultsArea.appendChild(tpl);
+    }
 
-        // Size
-        let sizeText = '-';
-        if (data.size) {
-            let kb = data.size / 1024;
-            if (kb > 1024) {
-                sizeText = (kb / 1024).toFixed(2) + ' MB';
-            } else {
-                sizeText = kb.toFixed(1) + ' KB';
-            }
-        }
-        document.getElementById('res-size').textContent = sizeText;
+    function showResults(data) {
+        let errBadgeClass = data.statusCode >= 400 || data.statusCode === 0 ? 'has-errors' : '';
+        let errTextClass = data.statusCode >= 400 || data.statusCode === 0 ? 'text-error-active' : 'text-error';
+        let errorsCount = data.statusCode >= 400 || data.statusCode === 0 ? 1 : 0;
+        
+        let cacheClass = 'unknown';https://github.com/2405101270161-bit/cdn-extension/pull/6/conflict?name=background.js&ancestor_oid=37889d538abc192c64dc539a06840a2f29f8dc8d&base_oid=a95e6535686c5b875b1cae4b171583bb357bb221&head_oid=5ca0a9948b36dc0b9eacaeaf924b9a8313333a93
+        if (data.cacheStatus.toUpperCase().includes('HIT')) cacheClass = 'hit';
+        if (data.cacheStatus.toUpperCase().includes('MISS')) cacheClass = 'miss';
+        
+        let cdnText = data.cdnProvider !== 'Unknown' 
+            ? `Content appears to be served by ${data.cdnProvider}.` 
+            : `No known CDN headers detected directly due to browser CORS policies.`;
 
-        // Load Time
-        document.getElementById('res-time').textContent = data.time ? `${data.time} ms` : '-';
+        resultsArea.innerHTML = `
+            <div class="card provider-card">
+                <span class="label">Primary CDN Provider</span>
+                <h2 id="cdn-provider" class="value text-gradient">${data.cdnProvider}</h2>
+            </div>
+
+            <div class="metrics-grid">
+                <div class="metric-box">
+                    <span class="label">Cache Status</span>
+                    <span id="cache-status" class="value badge ${cacheClass}">${data.cacheStatus}</span>
+                </div>
+                <div class="metric-box">
+                    <span class="label">Load Time</span>
+                    <span id="load-time" class="value">${data.loadTime} ms</span>
+                </div>
+                <div class="metric-box">
+                    <span class="label">Status</span>
+                    <span id="total-requests" class="value">${data.statusCode === 0 ? 'Opaque' : data.statusCode}</span>
+                </div>
+                <div class="metric-box error-box ${errBadgeClass}">
+                    <span class="label">Errors</span>
+                    <span id="errors" class="value ${errTextClass}">${errorsCount}</span>
+                </div>
+            </div>
+            
+            <div class="summary-section">
+                <h3>Request Summary</h3>
+                <p id="summary-text">Analyzed 1 request for ${data.url}. Response took ${data.loadTime}ms. ${cdnText}</p>
+            </div>
+        `;
     }
 });
