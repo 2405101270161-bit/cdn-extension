@@ -71,7 +71,7 @@ document.addEventListener('DOMContentLoaded', () => {
         let errTextClass = data.statusCode >= 400 || data.statusCode === 0 ? 'text-error-active' : 'text-error';
         let errorsCount = data.statusCode >= 400 || data.statusCode === 0 ? 1 : 0;
         
-        let cacheClass = 'unknown';
+        let cacheClass = 'unknown';https://github.com/2405101270161-bit/cdn-extension/pull/6/conflict?name=background.js&ancestor_oid=37889d538abc192c64dc539a06840a2f29f8dc8d&base_oid=a95e6535686c5b875b1cae4b171583bb357bb221&head_oid=5ca0a9948b36dc0b9eacaeaf924b9a8313333a93
         if (data.cacheStatus.toUpperCase().includes('HIT')) cacheClass = 'hit';
         if (data.cacheStatus.toUpperCase().includes('MISS')) cacheClass = 'miss';
         
