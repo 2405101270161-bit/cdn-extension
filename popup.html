@@ -3,56 +3,95 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CDN Analyzer</title>
+    <title>CDN Analyzer Pro</title>
     <link rel="stylesheet" href="styles.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 </head>
 <body>
-    <div class="container">
+    <div class="app-container">
+        <!-- Header Section -->
         <header>
-            <h1>CDN Analyzer</h1>
-            <button id="refresh-btn" class="icon-btn" title="Refresh Data">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M23 4v6h-6"></path>
-                    <path d="M1 20v-6h6"></path>
-                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+            <div class="logo">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
                 </svg>
-            </button>
+                <h1>CDN Analyzer Pro</h1>
+            </div>
         </header>
 
-        <main>
-            <div class="card provider-card">
-                <span class="label">Primary CDN Provider</span>
-                <h2 id="cdn-provider" class="value text-gradient">Analyzing...</h2>
+        <!-- Input Section -->
+        <section class="input-section glass-panel">
+            <div class="input-group">
+                <input type="url" id="target-url" placeholder="Enter website URL...">
+            </div>
+            <div class="action-buttons">
+                <button id="analyze-btn" class="btn primary-btn">Analyze</button>
+                <button id="load-test-btn" class="btn secondary-btn">Load Test</button>
+            </div>
+            <div id="error-message" class="error-message hidden"></div>
+        </section>
+
+        <!-- Loading State -->
+        <div id="loading-state" class="loading-state hidden">
+            <div class="spinner"></div>
+            <p>Analyzing Target...</p>
+        </div>
+
+        <!-- Dashboard Results -->
+        <section id="results-dashboard" class="dashboard hidden">
+            
+            <!-- Score Card -->
+            <div class="score-card glass-panel">
+                <div class="progress-wrapper">
+                    <svg class="progress-circle" width="120" height="120">
+                        <circle class="progress-bg" cx="60" cy="60" r="50"></circle>
+                        <circle class="progress-value" cx="60" cy="60" r="50" id="score-circle"></circle>
+                    </svg>
+                    <div class="score-text">
+                        <span id="score-number">0</span>
+                    </div>
+                </div>
+                <div class="score-details">
+                    <h2 id="score-grade">A Excellent</h2>
+                    <p id="score-desc">Based on load time & response quality</p>
+                </div>
             </div>
 
-            <div class="metrics-grid">
-                <div class="metric-box">
-                    <span class="label">Cache Status</span>
-                    <span id="cache-status" class="value badge unknown">UNKNOWN</span>
-                </div>
-                <div class="metric-box">
-                    <span class="label">Avg Load Time</span>
-                    <span id="load-time" class="value">0 ms</span>
-                </div>
-                <div class="metric-box">
-                    <span class="label">Total Requests</span>
-                    <span id="total-requests" class="value">0</span>
-                </div>
-                <div class="metric-box error-box">
-                    <span class="label">Errors</span>
-                    <span id="errors" class="value text-error">0</span>
+            <!-- Overview Panel -->
+            <div class="overview-panel glass-panel">
+                <h3>Analysis Overview</h3>
+                <div class="metrics-grid">
+                    <div class="metric-item">
+                        <span class="metric-label">Website</span>
+                        <span id="res-website" class="metric-value truncate" title="N/A">-</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">CDN Provider</span>
+                        <span id="res-cdn" class="metric-value highlight">-</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Edge Server</span>
+                        <span id="res-server" class="metric-value truncate" title="N/A">-</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Status Code</span>
+                        <span id="res-status" class="metric-value">-</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Cache Status</span>
+                        <span id="res-cache" class="metric-value badge">-</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Content Size</span>
+                        <span id="res-size" class="metric-value">-</span>
+                    </div>
+                    <div class="metric-item full-width">
+                        <span class="metric-label">Load Time</span>
+                        <span id="res-time" class="metric-value time-value">-</span>
+                    </div>
                 </div>
             </div>
-            
-            <div class="summary-section">
-                <h3>Request Summary</h3>
-                <p id="summary-text">Waiting for network activity...</p>
-            </div>
-        </main>
-        
-        <footer>
-            <span>Manifest V3 Ready</span>
-        </footer>
+        </section>
     </div>
     
     <script src="popup.js"></script>
