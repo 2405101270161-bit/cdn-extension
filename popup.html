@@ -10,7 +10,7 @@
     <div class="container">
         <header>
             <h1>CDN Analyzer</h1>
-            <button id="refresh-btn" class="icon-btn" title="Refresh Data">
+            <button id="refreshBtn" class="icon-btn" title="Refresh Data">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M23 4v6h-6"></path>
                     <path d="M1 20v-6h6"></path>
@@ -20,33 +20,15 @@
         </header>
 
         <main>
-            <div class="card provider-card">
-                <span class="label">Primary CDN Provider</span>
-                <h2 id="cdn-provider" class="value text-gradient">Analyzing...</h2>
+            <div class="input-section" style="display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px;">
+                <input type="text" id="urlInput" placeholder="Enter website URL..." autofocus style="padding: 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--card-bg); color: var(--text-primary); font-size: 0.95rem; outline: none; width: 100%; box-sizing: border-box;" />
+                <div style="display: flex; gap: 10px;">
+                    <button id="analyzeBtn" disabled style="flex: 1; padding: 10px; border-radius: 8px; background: linear-gradient(135deg, #38bdf8, #818cf8); color: white; font-weight: bold; border: none; cursor: pointer;">Analyze</button>
+                </div>
             </div>
 
-            <div class="metrics-grid">
-                <div class="metric-box">
-                    <span class="label">Cache Status</span>
-                    <span id="cache-status" class="value badge unknown">UNKNOWN</span>
-                </div>
-                <div class="metric-box">
-                    <span class="label">Avg Load Time</span>
-                    <span id="load-time" class="value">0 ms</span>
-                </div>
-                <div class="metric-box">
-                    <span class="label">Total Requests</span>
-                    <span id="total-requests" class="value">0</span>
-                </div>
-                <div class="metric-box error-box">
-                    <span class="label">Errors</span>
-                    <span id="errors" class="value text-error">0</span>
-                </div>
-            </div>
-            
-            <div class="summary-section">
-                <h3>Request Summary</h3>
-                <p id="summary-text">Waiting for network activity...</p>
+            <div id="resultsArea">
+                <!-- Data populated dynamically -->
             </div>
         </main>
         
@@ -54,6 +36,15 @@
             <span>Manifest V3 Ready</span>
         </footer>
     </div>
+    
+    <template id="loadingTemplate">
+        <div class="loading-state" style="display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px 0; gap: 15px;">
+            <div style="width: 40px; height: 40px; border: 3px solid rgba(139, 92, 246, 0.3); border-top-color: var(--accent); border-radius: 50%; animation: spin 1s linear infinite;"></div>
+            <p>Analyzing...</p>
+        </div>
+    </template>
+    
+    <style>@keyframes spin { to { transform: rotate(360deg); } }</style>
     
     <script src="popup.js"></script>
 </body>

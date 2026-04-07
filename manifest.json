@@ -4,11 +4,11 @@
   "version": "1.0",
   "description": "Analyzes CDN usage and network performance in real-time.",
   "permissions": [
-    "webRequest",
-    "storage",
     "activeTab",
-    "scripting",
-    "tabs"
+    "storage",
+    "tabs",
+    "webRequest",
+    "webRequestBlocking"
   ],
   "host_permissions": [
     "<all_urls>"
