@@ -10,6 +10,17 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 });
 
 async function analyzeUrl(url) {
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        url = 'https://' + url;
+    }
+
+    let parsedUrl;
+    try {
+        parsedUrl = new URL(url);
+    } catch(e) {
+        throw new Error("Invalid URL");
+    }
+
     const startTime = performance.now();
     
     // We use a GET request here because sometimes HEAD doesn't trigger cache the same way,
@@ -22,7 +33,7 @@ async function analyzeUrl(url) {
             cache: 'no-store' // don't use browser local cache to get true network hit/miss
         });
     } catch(err) {
-        throw new Error("Network error or CORS blocked. Is the URL correct?");
+        throw new Error("CORS blocked or site unreachable");
     }
 
     const endTime = performance.now();
@@ -32,31 +43,37 @@ async function analyzeUrl(url) {
     
     // Extract required data
     const status = response.status;
-    const domain = new URL(url).hostname;
+    const domain = parsedUrl.hostname;
+    const protocol = parsedUrl.protocol;
     
-    // Read headers
-    const serverValue = headers.get('server') || '';
+    // Read headers safely
+    const serverValue = headers.get('server') || 'Unknown';
     const viaValue = headers.get('via') || '';
     const cfRay = headers.get('cf-ray');
     const amzCfId = headers.get('x-amz-cf-id');
+    const xServedBy = headers.get('x-served-by');
+    const xAzureRef = headers.get('x-azure-ref');
     const cacheHit = headers.get('x-cache') || headers.get('cf-cache-status') || headers.get('x-edge-result');
     const contentLength = headers.get('content-length');
 
-    // Detect CDN
+    // Detect CDN safely
     let cdn = 'Unknown';
-    if (cfRay || serverValue.toLowerCase().includes('cloudflare')) {
+    const serverLower = serverValue.toLowerCase();
+    const viaLower = viaValue.toLowerCase();
+
+    if (cfRay || serverLower.includes('cloudflare')) {
         cdn = 'Cloudflare';
-    } else if (amzCfId || serverValue.toLowerCase().includes('cloudfront') || viaValue.toLowerCase().includes('cloudfront')) {
+    } else if (amzCfId || serverLower.includes('cloudfront') || viaLower.includes('cloudfront')) {
         cdn = 'AWS CloudFront';
-    } else if (serverValue.toLowerCase().includes('akamai') || viaValue.toLowerCase().includes('akamai')) {
+    } else if (serverLower.includes('akamai') || viaLower.includes('akamai')) {
         cdn = 'Akamai';
-    } else if (serverValue.toLowerCase().includes('fastly') || viaValue.toLowerCase().includes('fastly')) {
+    } else if (xServedBy || serverLower.includes('fastly') || viaLower.includes('fastly')) {
         cdn = 'Fastly';
-    } else if (headers.get('x-azure-ref')) {
+    } else if (xAzureRef) {
         cdn = 'Azure Front Door';
     } else if (headers.get('x-edgeconnect-proxied')) {
          cdn = 'Edgecast';
-    } else if (serverValue) {
+    } else if (serverValue !== 'Unknown') {
         // Fallback to server name if it's somewhat known
         cdn = `Server: ${serverValue.split(' ')[0]}`;
     }
@@ -67,13 +84,16 @@ async function analyzeUrl(url) {
         const lower = cacheHit.toLowerCase();
         if (lower.includes('hit')) cacheStatus = 'HIT';
         else if (lower.includes('miss')) cacheStatus = 'MISS';
-        else cacheStatus = cacheHit.toUpperCase();
+        else cacheStatus = 'UNKNOWN';
     }
 
-    // Edge Server Info
-    let edgeServer = serverValue;
-    if (cfRay) edgeServer = `CF-Ray: ${cfRay.split('-')[1] || cfRay}`;
-    if (amzCfId) edgeServer = `Amz-Id: ${amzCfId.substring(0, 10)}...`;
+    // Edge Server Info Cleanup
+    let edgeServer = serverValue !== 'Unknown' ? serverValue : 'Unknown';
+    if (cfRay) {
+        edgeServer = `CF-Ray: ${cfRay.split('-')[1] || cfRay}`;
+    } else if (amzCfId) {
+        edgeServer = `Amz-Id: ${amzCfId.substring(0, 10)}`;
+    }
 
     // Calculate Score (0-100)
     // < 500ms = 90-100
@@ -94,14 +114,23 @@ async function analyzeUrl(url) {
     if (status >= 400) {
         score = Math.max(0, score - 30);
     }
+    
+    score = Math.max(0, Math.min(100, score));
+    
+    let contentSize = null;
+    if (contentLength) {
+        contentSize = parseInt(contentLength, 10);
+        if (isNaN(contentSize)) contentSize = null;
+    }
 
     return {
+        protocol: protocol,
         domain: domain,
         cdn: cdn,
-        server: edgeServer || 'Unknown',
+        server: edgeServer,
         status: status,
         cache: cacheStatus,
-        size: contentLength ? parseInt(contentLength, 10) : null,
+        size: contentSize,
         time: duration,
         score: score
     };
