@@ -15,36 +15,67 @@ document.addEventListener('DOMContentLoaded', () => {
     async function analyze() {
         if (!urlInput.value.trim()) return;
 
-        const cleanUrl = urlInput.value
-            .trim()
-            .replace(/^https?:\/\//, '')
-            .replace(/\/$/, '');
+        let url = urlInput.value.trim();
+        if (!url.startsWith('http')) {
+            url = 'https://' + url;
+        }
 
         showLoadingUI();
 
+        const startTime = performance.now();
+
         try {
-            const res = await fetch(`http://localhost:3000/analyze?url=${cleanUrl}`);
-            const json = await res.json();
+            // Using fetch with cache: 'no-cache' to get real-time results
+            const response = await fetch(url, { 
+                mode: 'cors',
+                cache: 'no-cache'
+            });
+            
+            const endTime = performance.now();
+            const loadTime = Math.round(endTime - startTime);
+
+            // Detection logic
+            const headers = response.headers;
+            let cdn = "Unknown";
+            let edgeServer = headers.get("server") || "Unknown";
+            let cacheStatus = "UNKNOWN";
+
+            // Marker check
+            if (headers.get("cf-ray")) {
+                cdn = "Cloudflare";
+                cacheStatus = headers.get("cf-cache-status") || "DYNAMIC";
+            } else if (headers.get("x-amz-cf-id")) {
+                cdn = "CloudFront";
+                cacheStatus = headers.get("x-cache") || "UNKNOWN";
+            } else if (edgeServer.toLowerCase().includes("akamai") || headers.get("x-akamai-transformed")) {
+                cdn = "Akamai";
+            } else if (headers.get("x-fastly-request-id")) {
+                cdn = "Fastly";
+                cacheStatus = headers.get("x-cache") || "UNKNOWN";
+            } else if (headers.get("x-vercel-id")) {
+                cdn = "Vercel / Edge";
+                cacheStatus = headers.get("x-vercel-cache") || "UNKNOWN";
+            }
 
             const data = {
-                url: json.url,
-                score: json.loadTime < 500 ? 95 : 75,
-                cdnProvider: json.cdn,
-                edgeServer: (json.headers || {}).server || "Unknown",
-                statusCode: json.status,
-                cacheStatus: (json.headers || {})["cf-cache-status"] || "UNKNOWN",
-                contentSize: "-",
-                loadTime: json.loadTime,
-                ttfb: Math.round(json.loadTime / 2),
-                protocol: "HTTP/2",
+                url: url,
+                score: loadTime < 500 ? 95 : 75,
+                cdnProvider: cdn,
+                edgeServer: edgeServer,
+                statusCode: response.status,
+                cacheStatus: cacheStatus,
+                contentSize: headers.get("content-length") || "-",
+                loadTime: loadTime,
+                ttfb: Math.round(loadTime / 2),
+                protocol: response.type === 'opaque' ? "Unknown" : "HTTPS",
                 tlsVersion: "TLS 1.3"
             };
 
             showResults(data);
 
         } catch (err) {
-            console.error(err);
-            showError("Backend not running. Start server.");
+            console.error("Client-side Analysis Error:", err);
+            showError("Analysis Failed: " + err.message);
         }
     }
 
