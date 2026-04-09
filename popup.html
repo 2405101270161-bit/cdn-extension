@@ -10,30 +10,24 @@
 <body>
     <div class="app-container">
         <!-- Header Section -->
-        <header>
-            <h1>CDN Analyzer</h1>
-            <button id="refreshBtn" class="icon-btn" title="Refresh Data">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M23 4v6h-6"></path>
-                    <path d="M1 20v-6h6"></path>
-                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
-                </svg>
-                <h1>CDN Analyzer Pro</h1>
-            </div>
+        <header class="app-header">
+            <svg class="header-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+            </svg>
+            <h1>CDN Analyzer Pro</h1>
+            <button id="refreshBtn" style="display: none;"></button>
         </header>
 
-        <main>
-            <div class="input-section" style="display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px;">
-                <input type="text" id="urlInput" placeholder="Enter website URL..." autofocus style="padding: 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--card-bg); color: var(--text-primary); font-size: 0.95rem; outline: none; width: 100%; box-sizing: border-box;" />
-                <div style="display: flex; gap: 10px;">
-                    <button id="analyzeBtn" disabled style="flex: 1; padding: 10px; border-radius: 8px; background: linear-gradient(135deg, #38bdf8, #818cf8); color: white; font-weight: bold; border: none; cursor: pointer;">Analyze</button>
-                </div>
+        <main class="app-main">
+            <div class="input-section">
+                <input type="text" id="urlInput" class="app-input" placeholder="Enter website URL..." autofocus />
+                <button id="analyzeBtn" class="btn primary-btn app-btn" disabled>Analyze</button>
             </div>
 
             <div id="resultsArea">
                 <!-- Data populated dynamically -->
             </div>
-        </section>
+        </main>
     </div>
     
     <template id="loadingTemplate">
