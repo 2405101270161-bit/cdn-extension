@@ -286,6 +286,13 @@ body {
     margin-top: 4px;
 }
 
+.sample-info {
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    margin-top: 15px;
+    opacity: 0.8;
+}
+
 /* Overview Card */
 .overview-card {
     background: rgba(0, 0, 0, 0.2);
@@ -316,10 +323,14 @@ body {
     color: var(--text-primary);
 }
 
+.info-value.highlight {
+    color: var(--accent-primary);
+}
+
 .info-value.url {
     grid-column: 1 / -1;
     font-size: 0.75rem;
-    color: var(--accent-primary);
+    color: var(--text-secondary);
     word-break: break-all;
     opacity: 0.8;
 }
@@ -327,7 +338,7 @@ body {
 /* Metric Tiles */
 .metrics-row {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(2, 1fr);
     gap: 10px;
 }
 
@@ -335,37 +346,49 @@ body {
     background: var(--panel-bg);
     border: 1px solid var(--panel-border);
     border-radius: 12px;
-    padding: 12px 8px;
+    padding: 12px;
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     transition: transform 0.2s, border-color 0.2s;
 }
 
-.metric-tile:hover {
-    transform: translateY(-2px);
-    border-color: rgba(255, 255, 255, 0.15);
+.metric-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    justify-content: center;
+    margin-bottom: 2px;
 }
 
-.metric-tile svg {
-    width: 20px;
-    height: 20px;
-    color: var(--accent-primary);
-    opacity: 0.9;
-}
-
-.metric-tile-value {
-    font-size: 0.85rem;
-    font-weight: 700;
-}
-
-.metric-tile-label {
-    font-size: 0.6rem;
+.metric-header span {
+    font-size: 0.65rem;
     color: var(--text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.05em;
 }
+
+.metric-header svg {
+    width: 14px;
+    height: 14px;
+    color: var(--accent-primary);
+}
+
+.metric-tile-value {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.metric-stats {
+    font-size: 0.6rem;
+    color: var(--text-secondary);
+    opacity: 0.6;
+    margin-top: 2px;
+}
+
 
 /* Status Colors */
 .text-success { color: var(--success); }
