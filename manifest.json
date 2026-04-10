@@ -18,6 +18,18 @@
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "CDN Analyzer Pro"
+    "default_title": "CDN Analyzer Pro",
+    "default_icon": {
+      "16": "icons/icon-v7.png",
+      "32": "icons/icon-v7.png",
+      "48": "icons/icon-v7.png",
+      "128": "icons/icon-v7.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon-v7.png",
+    "32": "icons/icon-v7.png",
+    "48": "icons/icon-v7.png",
+    "128": "icons/icon-v7.png"
   }
 }
