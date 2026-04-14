@@ -22,61 +22,24 @@ document.addEventListener('DOMContentLoaded', () => {
 
         showLoadingUI();
 
-        const startTime = performance.now();
-
-        try {
-            // Using fetch with cache: 'no-cache' to get real-time results
-            const response = await fetch(url, { 
-                mode: 'cors',
-                cache: 'no-cache'
-            });
-            
-            const endTime = performance.now();
-            const loadTime = Math.round(endTime - startTime);
-
-            // Detection logic
-            const headers = response.headers;
-            let cdn = "Unknown";
-            let edgeServer = headers.get("server") || "Unknown";
-            let cacheStatus = "UNKNOWN";
-
-            // Marker check
-            if (headers.get("cf-ray")) {
-                cdn = "Cloudflare";
-                cacheStatus = headers.get("cf-cache-status") || "DYNAMIC";
-            } else if (headers.get("x-amz-cf-id")) {
-                cdn = "CloudFront";
-                cacheStatus = headers.get("x-cache") || "UNKNOWN";
-            } else if (edgeServer.toLowerCase().includes("akamai") || headers.get("x-akamai-transformed")) {
-                cdn = "Akamai";
-            } else if (headers.get("x-fastly-request-id")) {
-                cdn = "Fastly";
-                cacheStatus = headers.get("x-cache") || "UNKNOWN";
-            } else if (headers.get("x-vercel-id")) {
-                cdn = "Vercel / Edge";
-                cacheStatus = headers.get("x-vercel-cache") || "UNKNOWN";
+        // Delegate heavy lifting and CORS-sensitive work to background script
+        chrome.runtime.sendMessage({ 
+            action: 'START_ANALYSIS', 
+            url: url 
+        }, (response) => {
+            if (chrome.runtime.lastError) {
+                console.error("Messaging Error:", chrome.runtime.lastError);
+                showError("Extension Service Error. Please reload the extension.");
+                return;
             }
 
-            const data = {
-                url: url,
-                score: loadTime < 500 ? 95 : 75,
-                cdnProvider: cdn,
-                edgeServer: edgeServer,
-                statusCode: response.status,
-                cacheStatus: cacheStatus,
-                contentSize: headers.get("content-length") || "-",
-                loadTime: loadTime,
-                ttfb: Math.round(loadTime / 2),
-                protocol: response.type === 'opaque' ? "Unknown" : "HTTPS",
-                tlsVersion: "TLS 1.3"
-            };
-
-            showResults(data);
-
-        } catch (err) {
-            console.error("Client-side Analysis Error:", err);
-            showError("Analysis Failed: " + err.message);
-        }
+            if (response && response.success) {
+                showResults(response.data);
+            } else {
+                console.error("Analysis Error:", response?.error);
+                showError(response?.error || "Analysis Failed. Check URL and try again.");
+            }
+        });
     }
 
     analyzeBtn.addEventListener('click', analyze);
