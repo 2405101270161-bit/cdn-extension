@@ -23,116 +23,25 @@ document.addEventListener('DOMContentLoaded', () => {
         showLoadingUI();
         const loadingText = document.querySelector('.loading-state p');
 
-        const samples = 5;
-        const results = [];
-        
-        for (let i = 0; i < samples; i++) {
-            if (loadingText) loadingText.textContent = `Analyzing sample ${i + 1}/${samples}...`;
-            
-            const analysisId = `id_${Date.now()}_${i}`;
-            const targetUrl = url + (url.includes('?') ? '&' : '?') + `cdn_analyzer_id=${analysisId}`;
-
-            try {
-                // Trigger the request (mode: 'no-cors' for maximum compatibility)
-                await fetch(targetUrl, { mode: 'no-cors', cache: 'no-cache' });
-
-                // Poll background for metrics (retry up to 10 times, every 100ms)
-                let sampleData = null;
-                for (let retry = 0; retry < 10; retry++) {
-                    await new Promise(r => setTimeout(r, 150));
-                    const response = await chrome.runtime.sendMessage({
-                        type: "GET_SAMPLE_DATA",
-                        id: analysisId
-                    });
-                    
-                    if (response.success) {
-                        sampleData = response.data;
-                        break;
-                    }
-                }
-
-                if (sampleData) {
-                    results.push(sampleData);
-                    console.log(`Sample ${i+1} captured:`, sampleData);
-                } else {
-                    console.warn(`Sample ${i+1} metrics not captured by background.`);
-                }
-            } catch (err) {
-                console.error(`Sample ${i+1} fetch failed:`, err);
+        // Delegate heavy lifting and CORS-sensitive work to background script
+        chrome.runtime.sendMessage({ 
+            action: 'START_ANALYSIS', 
+            url: url 
+        }, (response) => {
+            if (chrome.runtime.lastError) {
+                console.error("Messaging Error:", chrome.runtime.lastError);
+                showError("Extension Service Error. Please reload the extension.");
+                return;
             }
         }
 
-        if (results.length === 0) {
-            showError("Failed to gather network metrics. Please check the URL and your connection.");
-            return;
-        }
-
-        processResults(url, results);
-    }
-
-    function processResults(url, results) {
-        // Aggregate statistics
-        const ttfbs = results.map(r => r.ttfb);
-        const loadTimes = results.map(r => r.loadTime);
-        const avgTTFB = Math.round(ttfbs.reduce((a, b) => a + b, 0) / ttfbs.length);
-        const avgLoadTime = Math.round(loadTimes.reduce((a, b) => a + b, 0) / loadTimes.length);
-        
-        const firstSuccess = results[0];
-        const headers = firstSuccess.headers || [];
-        const serverHeader = headers.find(h => h.name.toLowerCase() === 'server')?.value || 'Unknown';
-        
-        // Accurate detection logic
-        const cdnProvider = getCDNProvider(headers, serverHeader);
-        const cacheStatus = getCacheStatus(headers);
-        
-        // Scoring
-        const ttfbScore = avgTTFB < 100 ? 100 : (avgTTFB < 300 ? 80 : (avgTTFB < 600 ? 60 : 40));
-        const loadScore = avgLoadTime < 1000 ? 100 : (avgLoadTime < 2000 ? 80 : (avgLoadTime < 3000 ? 60 : 40));
-        const finalScore = Math.round((ttfbScore * 0.4) + (loadScore * 0.6));
-        
-        // Std Dev / Stability
-        const stdDev = Math.sqrt(loadTimes.map(x => Math.pow(x - avgLoadTime, 2)).reduce((a, b) => a + b, 0) / loadTimes.length);
-
-        showResults({
-            url: url,
-            score: finalScore,
-            cdnProvider,
-            edgeServer: serverHeader,
-            statusCode: firstSuccess.statusCode,
-            cacheStatus,
-            loadTime: avgLoadTime,
-            ttfb: avgTTFB,
-            minTTFB: Math.min(...ttfbs),
-            maxTTFB: Math.max(...ttfbs),
-            minLoad: Math.min(...loadTimes),
-            maxLoad: Math.max(...loadTimes),
-            protocol: firstSuccess.protocol,
-            samplesCount: results.length,
-            stability: stdDev < (avgLoadTime * 0.2) ? "Stable" : "Unstable"
+            if (response && response.success) {
+                showResults(response.data);
+            } else {
+                console.error("Analysis Error:", response?.error);
+                showError(response?.error || "Analysis Failed. Check URL and try again.");
+            }
         });
-    }
-
-    function getCDNProvider(headers, edgeServer) {
-        const headerMap = {};
-        headers.forEach(h => { headerMap[h.name.toLowerCase()] = h.value; });
-
-        if (headerMap['cf-ray'] || (edgeServer && edgeServer.includes('cloudflare'))) return "Cloudflare";
-        if (headerMap['x-amz-cf-id'] || (headerMap['via'] && headerMap['via'].includes('CloudFront')) || (edgeServer && edgeServer.includes('AmazonS3'))) return "AWS CloudFront";
-        if (headerMap['x-akamai-transformed'] || (edgeServer && edgeServer.includes('Akamai')) || (headerMap['via'] && headerMap['via'].includes('Akamai'))) return "Akamai";
-        if (headerMap['x-fastly-request-id'] || (headerMap['via'] && headerMap['via'].includes('Fastly'))) return "Fastly";
-        if (headerMap['x-vercel-id']) return "Vercel / Edge";
-        if (edgeServer && (edgeServer.includes('GSE') || edgeServer.includes('Google'))) return "Google Cloud";
-        if (headerMap['x-edge-location']) return "EdgeCast / Verizon";
-        return "Unknown";
-    }
-
-    function getCacheStatus(headers) {
-        const headerMap = {};
-        headers.forEach(h => { headerMap[h.name.toLowerCase()] = h.value; });
-        const res = headerMap['cf-cache-status'] || headerMap['x-cache'] || headerMap['x-vercel-cache'] || 'UNKNOWN';
-        if (res.toUpperCase().includes('HIT')) return 'HIT';
-        if (res.toUpperCase().includes('MISS')) return 'MISS';
-        return res.toUpperCase();
     }
 
     analyzeBtn.addEventListener('click', analyze);
