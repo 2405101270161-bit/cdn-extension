@@ -21,17 +21,37 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         showLoadingUI();
-        const loadingText = document.querySelector('.loading-state p');
 
-        // Delegate heavy lifting and CORS-sensitive work to background script
-        chrome.runtime.sendMessage({ 
-            action: 'START_ANALYSIS', 
-            url: url 
-        }, (response) => {
-            if (chrome.runtime.lastError) {
-                console.error("Messaging Error:", chrome.runtime.lastError);
-                showError("Extension Service Error. Please reload the extension.");
-                return;
+        const startTime = performance.now();
+
+        try {
+            const response = await fetch(url, { 
+                mode: 'cors',
+                cache: 'no-cache'
+            });
+            
+            const endTime = performance.now();
+            const loadTime = Math.round(endTime - startTime);
+
+            const headers = response.headers;
+            let cdn = "Unknown";
+            let edgeServer = headers.get("server") || "Unknown";
+            let cacheStatus = "UNKNOWN";
+
+            if (headers.get("cf-ray")) {
+                cdn = "Cloudflare";
+                cacheStatus = headers.get("cf-cache-status") || "DYNAMIC";
+            } else if (headers.get("x-amz-cf-id")) {
+                cdn = "CloudFront";
+                cacheStatus = headers.get("x-cache") || "UNKNOWN";
+            } else if (edgeServer.toLowerCase().includes("akamai") || headers.get("x-akamai-transformed")) {
+                cdn = "Akamai";
+            } else if (headers.get("x-fastly-request-id")) {
+                cdn = "Fastly";
+                cacheStatus = headers.get("x-cache") || "UNKNOWN";
+            } else if (headers.get("x-vercel-id")) {
+                cdn = "Vercel / Edge";
+                cacheStatus = headers.get("x-vercel-cache") || "UNKNOWN";
             }
         }
 
@@ -70,11 +90,6 @@ document.addEventListener('DOMContentLoaded', () => {
         if (data.cacheStatus === 'MISS') cacheColor = 'text-warning';
         
         const score = data.score || 0;
-        let grade = "D";
-        if (score >= 90) grade = "A";
-        else if (score >= 75) grade = "B";
-        else if (score >= 60) grade = "C";
-
         const circumference = 2 * Math.PI * 65;
         const offset = circumference - (score / 100) * circumference;
 
