@@ -37,7 +37,6 @@ body {
     flex-direction: column;
 }
 
-/* Header */
 .app-header {
     display: flex;
     align-items: center;
@@ -84,7 +83,6 @@ body {
     -webkit-text-fill-color: transparent;
 }
 
-/* Glass Panels */
 .glass-panel {
     background: var(--panel-bg);
     backdrop-filter: blur(20px);
@@ -105,7 +103,6 @@ body {
     background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.1), transparent);
 }
 
-/* Input Section */
 .input-section {
     display: flex;
     flex-direction: column;
@@ -188,7 +185,6 @@ body {
     display: none !important;
 }
 
-/* Loading State */
 .loading-state {
     display: flex;
     flex-direction: column;
@@ -211,7 +207,6 @@ body {
     to { transform: rotate(360deg); } 
 }
 
-/* Dashboard Results */
 .dashboard {
     display: flex;
     flex-direction: column;
@@ -224,7 +219,6 @@ body {
     to { opacity: 1; transform: translateY(0); }
 }
 
-/* Circular Score Section */
 .score-section {
     display: flex;
     flex-direction: column;
@@ -255,7 +249,7 @@ body {
     stroke-width: 10;
     stroke-linecap: round;
     transition: stroke-dashoffset 1.2s cubic-bezier(0.34, 1.56, 0.64, 1);
-    stroke-dasharray: 408.4; /* 2 * PI * r (65) */
+    stroke-dasharray: 408.4;
     stroke-dashoffset: 408.4;
 }
 
@@ -286,14 +280,6 @@ body {
     margin-top: 4px;
 }
 
-.sample-info {
-    font-size: 0.7rem;
-    color: var(--text-secondary);
-    margin-top: 15px;
-    opacity: 0.8;
-}
-
-/* Overview Card */
 .overview-card {
     background: rgba(0, 0, 0, 0.2);
     border-radius: 16px;
@@ -335,7 +321,6 @@ body {
     opacity: 0.8;
 }
 
-/* Metric Tiles */
 .metrics-row {
     display: grid;
     grid-template-columns: repeat(2, 1fr);
@@ -389,8 +374,6 @@ body {
     margin-top: 2px;
 }
 
-
-/* Status Colors */
 .text-success { color: var(--success); }
 .text-warning { color: var(--warning); }
 .text-error { color: var(--error); }
