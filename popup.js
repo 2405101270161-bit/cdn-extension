@@ -25,7 +25,6 @@ document.addEventListener('DOMContentLoaded', () => {
         const startTime = performance.now();
 
         try {
-            // Using fetch with cache: 'no-cache' to get real-time results
             const response = await fetch(url, { 
                 mode: 'cors',
                 cache: 'no-cache'
@@ -34,13 +33,11 @@ document.addEventListener('DOMContentLoaded', () => {
             const endTime = performance.now();
             const loadTime = Math.round(endTime - startTime);
 
-            // Detection logic
             const headers = response.headers;
             let cdn = "Unknown";
             let edgeServer = headers.get("server") || "Unknown";
             let cacheStatus = "UNKNOWN";
 
-            // Marker check
             if (headers.get("cf-ray")) {
                 cdn = "Cloudflare";
                 cacheStatus = headers.get("cf-cache-status") || "DYNAMIC";
@@ -105,12 +102,11 @@ document.addEventListener('DOMContentLoaded', () => {
         if (data.cacheStatus.toUpperCase().includes('MISS')) cacheColor = 'text-warning';
         
         const score = data.score || 0;
-        const circumference = 2 * Math.PI * 65; // r=65
+        const circumference = 2 * Math.PI * 65;
         const offset = circumference - (score / 100) * circumference;
 
         resultsArea.innerHTML = `
             <div class="dashboard">
-                <!-- Circular Score -->
                 <div class="glass-panel score-section">
                     <div class="progress-container">
                         <svg class="progress-ring" width="140" height="140">
@@ -130,7 +126,6 @@ document.addEventListener('DOMContentLoaded', () => {
                     </div>
                 </div>
 
-                <!-- Overview Card -->
                 <div class="glass-panel">
                     <div class="overview-card">
                         <div class="info-group">
@@ -156,7 +151,6 @@ document.addEventListener('DOMContentLoaded', () => {
                     </div>
                 </div>
 
-                <!-- Metric Tiles -->
                 <div class="metrics-row">
                     <div class="metric-tile">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
@@ -177,7 +171,6 @@ document.addEventListener('DOMContentLoaded', () => {
             </div>
         `;
 
-        // Trigger animation
         setTimeout(() => {
             const circle = document.getElementById('scoreCircle');
             if (circle) {
