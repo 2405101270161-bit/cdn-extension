@@ -1,20 +1,35 @@
 {
   "manifest_version": 3,
   "name": "CDN Analyzer Pro",
-  "version": "1.0",
-  "description": "Analyzes CDN usage and network performance in real-time.",
+  "version": "2.0.0",
+  "description": "Analyzes CDN usage, network timing, security headers, and asset payloads using Chrome DevTools Protocol.",
   "permissions": [
     "activeTab",
+    "scripting",
     "storage",
     "tabs",
-    "webRequest"
+    "debugger"
   ],
   "host_permissions": [
-    "<all_urls>"
+    "http://*/*",
+    "https://*/*"
   ],
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "type": "module"
   },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
   "action": {
     "default_popup": "popup.html",
     "default_title": "CDN Analyzer Pro",
