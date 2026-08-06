@@ -1,103 +1,107 @@
 /**
- * CDN Analyzer Pro - Foundation Engine
- * Handles high-precision network profiling and CDN detection
+ * CDN Analyzer Pro v2 - Core Engine (Service Worker Orchestrator)
+ * Single-pass CDP Background Tab Analysis Engine.
  */
+
+import { executeCdpAnalysis } from './modules/cdp.js';
+
+const ANALYSIS_STATE_KEY = 'cdnAnalyzerAnalysisState';
+let activeAnalysisPromise = null;
+let currentAnalysisState = null;
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === 'START_ANALYSIS') {
-        performAnalysis(request.url).then(sendResponse);
-        return true; // Keep channel open for async response
+        startTrackedAnalysis(request).then(sendResponse);
+        return true; // Keep IPC channel open for async response
+    }
+    if (request.action === 'GET_ANALYSIS_STATE') {
+        getStoredAnalysisState().then(state => sendResponse({ state }));
+        return true;
+    }
+    if (request.action === 'CLEAR_ANALYSIS_STATE') {
+        clearAnalysisState().then(() => sendResponse({ success: true }));
+        return true;
     }
 });
 
-async function performAnalysis(targetUrl) {
-    console.log(`[Engine] Starting analysis for: ${targetUrl}`);
-    const startTime = performance.now();
+async function clearAnalysisState() {
+    activeAnalysisPromise = null;
+    currentAnalysisState = null;
+    await chrome.storage.session.remove(ANALYSIS_STATE_KEY).catch(() => {});
+}
+
+async function startTrackedAnalysis(options) {
+    if (activeAnalysisPromise && currentAnalysisState && currentAnalysisState.startedAt) {
+        const elapsed = Date.now() - new Date(currentAnalysisState.startedAt).getTime();
+        if (elapsed > 12000) {
+            console.warn("[CDP Engine v2] Resetting stale analysis promise after 12s timeout.");
+            activeAnalysisPromise = null;
+        }
+    }
+
+    if (activeAnalysisPromise) return activeAnalysisPromise;
+
+    const startedAt = new Date().toISOString();
+    await updateAnalysisState({
+        status: 'running',
+        url: options.url,
+        progress: 'Validating URL...',
+        result: null,
+        error: null,
+        startedAt
+    });
+
+    const notifyProgress = (stepMessage) => {
+        updateAnalysisState({ status: 'running', progress: stepMessage }).catch(() => {});
+        chrome.runtime.sendMessage({ action: 'ANALYSIS_PROGRESS', step: stepMessage }).catch(() => {});
+    };
+
+    activeAnalysisPromise = executeCdpAnalysis(options.url, notifyProgress);
 
     try {
-        // Fetch from background bypasses many frontend CORS restrictions
-        const response = await fetch(targetUrl, {
-            method: 'GET',
-            mode: 'cors',
-            cache: 'no-cache',
-            headers: {
-                'Pragma': 'no-cache',
-                'Cache-Control': 'no-cache'
-            }
+        const response = await activeAnalysisPromise;
+        await updateAnalysisState(response.success ? {
+            status: 'completed',
+            progress: 'Analysis complete',
+            result: response.data,
+            error: null
+        } : {
+            status: 'error',
+            progress: null,
+            result: null,
+            error: response.error || "Analysis failed."
         });
-
-        const endTime = performance.now();
-        const loadTime = Math.round(endTime - startTime);
-        
-        // Extract headers
-        const headers = response.headers;
-        const headerMap = {};
-        headers.forEach((value, key) => {
-            headerMap[key.toLowerCase()] = value;
-        });
-
-        // CDN Detection Logic
-        let cdn = "Unknown";
-        let edgeServer = headerMap['server'] || "Unknown";
-        let cacheStatus = "UNKNOWN";
-
-        // Provider Markers
-        if (headerMap['cf-ray']) {
-            cdn = "Cloudflare";
-            cacheStatus = headerMap['cf-cache-status'] || "DYNAMIC";
-        } else if (headerMap['x-amz-cf-id'] || headerMap['x-amz-cf-pop']) {
-            cdn = "CloudFront";
-            cacheStatus = headerMap['x-cache'] || "UNKNOWN";
-        } else if (edgeServer.toLowerCase().includes("akamai") || headerMap['x-akamai-transformed']) {
-            cdn = "Akamai";
-            cacheStatus = headerMap['x-cache-remote'] || "UNKNOWN";
-        } else if (headerMap['x-fastly-request-id']) {
-            cdn = "Fastly";
-            cacheStatus = headerMap['x-cache'] || "UNKNOWN";
-        } else if (headerMap['x-vercel-id']) {
-            cdn = "Vercel / Edge";
-            cacheStatus = headerMap['x-vercel-cache'] || "UNKNOWN";
-        } else if (headerMap['x-goog-generation'] || edgeServer.toLowerCase().includes("google")) {
-            cdn = "Google Cloud CDN";
-        } else if (headerMap['x-azure-ref']) {
-            cdn = "Azure Front Door";
-        }
-
-        // Performance Scoring
-        // Higher score for lower load time and cache hits
-        let score = 100;
-        if (loadTime > 1000) score -= 40;
-        else if (loadTime > 500) score -= 20;
-        else if (loadTime > 200) score -= 5;
-
-        if (cacheStatus.toUpperCase().includes('HIT')) score += 5;
-        if (cacheStatus.toUpperCase().includes('MISS')) score -= 10;
-        
-        score = Math.max(0, Math.min(100, score));
-
-        return {
-            success: true,
-            data: {
-                url: targetUrl,
-                score: score,
-                cdnProvider: cdn,
-                edgeServer: edgeServer,
-                statusCode: response.status,
-                cacheStatus: cacheStatus,
-                contentSize: headerMap['content-length'] || "N/A",
-                loadTime: loadTime,
-                ttfb: Math.round(loadTime * 0.4), // Approximation, better than popup estimation
-                protocol: "H2/H3",
-                tlsVersion: "TLS 1.3",
-                timestamp: new Date().toISOString()
-            }
-        };
-
-    } catch (error) {
-        console.error("[Engine] Analysis failed:", error);
-        return {
-            success: false,
-            error: error.message
-        };
+        return response;
+    } finally {
+        activeAnalysisPromise = null;
     }
+}
+
+async function getStoredAnalysisState() {
+    if (currentAnalysisState) return currentAnalysisState;
+    const stored = await chrome.storage.session.get(ANALYSIS_STATE_KEY);
+    currentAnalysisState = stored[ANALYSIS_STATE_KEY] || null;
+    if (currentAnalysisState && currentAnalysisState.status === 'running' && !activeAnalysisPromise) {
+        const elapsed = Date.now() - new Date(currentAnalysisState.updatedAt || currentAnalysisState.startedAt).getTime();
+        if (elapsed > 10000) {
+            currentAnalysisState.status = 'error';
+            currentAnalysisState.error = 'Analysis timed out or background worker restarted.';
+            await chrome.storage.session.set({ [ANALYSIS_STATE_KEY]: currentAnalysisState });
+        }
+    }
+    return currentAnalysisState;
+}
+
+async function updateAnalysisState(update) {
+    const previous = await getStoredAnalysisState();
+    currentAnalysisState = {
+        ...(previous || {}),
+        ...update,
+        updatedAt: new Date().toISOString()
+    };
+    await chrome.storage.session.set({ [ANALYSIS_STATE_KEY]: currentAnalysisState });
+    chrome.runtime.sendMessage({
+        action: 'ANALYSIS_STATE_UPDATED',
+        state: currentAnalysisState
+    }).catch(() => {});
 }

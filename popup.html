@@ -4,41 +4,91 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CDN Analyzer Pro</title>
-    <link rel="stylesheet" href="styles.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-    <div class="app-container">
-        <header class="app-header">
-            <svg class="header-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
-            </svg>
-            <h1>CDN Analyzer Pro</h1>
-            <button id="refreshBtn" style="display: none;"></button>
+    <div class="app">
+        <!-- Compact top bar: only visible once an analysis exists -->
+        <header class="topbar" id="topbar" hidden>
+            <div class="topbar-brand">
+                <img class="topbar-logo" src="icons/icon-v7.png" alt="CDN Analyzer Pro logo">
+                <span class="topbar-name">CDN Analyzer</span>
+            </div>
+            <button id="refreshBtn" class="ghost-btn" title="Reset and clear analysis" aria-label="Reset and clear analysis" type="button">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M23 4v6h-6"></path>
+                    <path d="M1 20v-6h6"></path>
+                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+                </svg>
+                <span>Reset</span>
+            </button>
         </header>
 
-        <main class="app-main">
-            <div class="glass-panel" style="margin-bottom: 20px; padding: 12px;">
-                <div class="input-section" style="margin-bottom: 0;">
-                    <input type="text" id="urlInput" class="app-input" placeholder="Enter website URL..." style="margin-top: 0;" autofocus />
-                    <button id="analyzeBtn" class="btn primary-btn app-btn" disabled>Analyze</button>
+        <main class="main">
+            <!-- HOME: logo, name, tagline, search, analyze -->
+            <section class="hero" id="hero">
+                <img class="hero-logo" src="icons/icon-v7.png" alt="CDN Analyzer Pro logo">
+                <h1 class="hero-title">CDN Analyzer Pro</h1>
+                <p class="hero-tagline">See how any website is delivered — CDN, cache, security and speed.</p>
+            </section>
+
+            <div class="search-block">
+                <div class="search-field" id="searchField">
+                    <span class="search-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="12" cy="12" r="9"></circle>
+                            <path d="M3.6 9h16.8M3.6 15h16.8"></path>
+                            <path d="M12 3a15 15 0 0 1 0 18a15 15 0 0 1 0-18z"></path>
+                        </svg>
+                    </span>
+                    <input type="text" id="urlInput" class="search-input" placeholder="Enter website URL…"
+                        autocomplete="off" spellcheck="false" aria-label="Website URL" autofocus />
+                    <button type="button" id="clearBtn" class="clear-btn" title="Clear" aria-label="Clear URL" hidden>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M18 6 6 18M6 6l12 12"></path>
+                        </svg>
+                    </button>
                 </div>
+                <p class="field-hint" id="urlHint" role="status" aria-live="polite"></p>
+
+                <button id="analyzeBtn" class="analyze-btn" type="button" disabled>
+                    <span class="analyze-label">
+                        <svg class="analyze-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M13 2 4.5 13.5H11l-.8 8.5L19.5 10H13z"></path>
+                        </svg>
+                        Analyze
+                    </span>
+                    <span class="analyze-spinner" aria-hidden="true"></span>
+                </button>
             </div>
 
-            <div id="resultsArea">
-            </div>
+            <div id="resultsArea"></div>
         </main>
     </div>
-    
+
     <template id="loadingTemplate">
-        <div class="loading-state" style="display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px 0; gap: 15px;">
-            <div style="width: 40px; height: 40px; border: 3px solid rgba(139, 92, 246, 0.3); border-top-color: var(--accent-primary); border-radius: 50%; animation: spin 1s linear infinite;"></div>
-            <p>Analyzing...</p>
+        <div class="loading-state">
+            <div class="wifi-loader" aria-hidden="true">
+                <svg class="wifi-circle outer" viewBox="0 0 86 86">
+                    <circle class="wifi-back" cx="43" cy="43" r="40"></circle>
+                    <circle class="wifi-front" cx="43" cy="43" r="40"></circle>
+                </svg>
+                <svg class="wifi-circle middle" viewBox="0 0 60 60">
+                    <circle class="wifi-back" cx="30" cy="30" r="27"></circle>
+                    <circle class="wifi-front" cx="30" cy="30" r="27"></circle>
+                </svg>
+                <svg class="wifi-circle inner" viewBox="0 0 34 34">
+                    <circle class="wifi-back" cx="17" cy="17" r="14"></circle>
+                    <circle class="wifi-front" cx="17" cy="17" r="14"></circle>
+                </svg>
+            </div>
+            <p class="loading-title">Analyzing Website…</p>
+            <p id="loadingStatusText" class="loading-step">Validating URL…</p>
+            <ul class="step-list" id="stepList"></ul>
         </div>
     </template>
-    
-    <style>@keyframes spin { to { transform: rotate(360deg); } }</style>
-    
+
     <script src="popup.js"></script>
 </body>
 </html>
