@@ -17,7 +17,14 @@
  *          epoch baseline.
  */
 
-import { detectCdnProvider, extractCacheStatus } from './cdn.js';
+import {
+    detectCdnProvider,
+    extractCacheStatus,
+    detectResourceCdn,
+    extractEdgeEvidence,
+    aggregateHostCdn,
+    scrubSensitiveHeaders
+} from './cdn.js';
 import { analyzeSecurity } from './security.js';
 import { analyzeResources } from './resources.js';
 import { calculateMetrics } from './metrics.js';
@@ -287,6 +294,62 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress, cancelToken = null) 
                 const cdnResult = detectCdnProvider(rawHeaders);
                 const cacheProviderStatus = extractCacheStatus(rawHeaders);
 
+                // Per-resource response collection and CDN/Edge detection
+                const resourceEvidenceList = [];
+                for (const [reqId, req] of requests.entries()) {
+                    if (!req.url || !/^https?:\/\//i.test(req.url)) continue;
+
+                    const mergedHeaders = {};
+                    if (req.response && req.response.headers) {
+                        for (const [k, v] of Object.entries(req.response.headers)) {
+                            mergedHeaders[k.toLowerCase()] = String(v);
+                        }
+                    }
+                    if (req.rawResponseHeaders) {
+                        for (const [k, v] of Object.entries(req.rawResponseHeaders)) {
+                            mergedHeaders[k.toLowerCase()] = String(v);
+                        }
+                    }
+
+                    const cleanHeaders = scrubSensitiveHeaders(mergedHeaders);
+                    const remoteIp = req.response?.remoteIPAddress || null;
+                    const remotePort = req.response?.remotePort || null;
+                    const protocol = req.response?.protocol || null;
+                    const statusCode = req.response?.status || (req.failed ? 0 : 200);
+
+                    const resourceCdn = detectResourceCdn(cleanHeaders, req.url, req.type, remoteIp, remotePort);
+                    const resourceCache = extractCacheStatus(cleanHeaders);
+
+                    resourceEvidenceList.push({
+                        requestId: reqId,
+                        url: req.url,
+                        hostname: resourceCdn.hostname,
+                        resourceType: req.type || 'Other',
+                        statusCode,
+                        protocol,
+                        remoteIPAddress: remoteIp,
+                        remotePort,
+                        encodedDataLength: req.encodedDataLength || 0,
+                        failed: req.failed || false,
+                        redirects: req.redirects || [],
+                        headers: cleanHeaders,
+                        cdn: resourceCdn,
+                        edge: resourceCdn.edge,
+                        cacheStatus: resourceCache
+                    });
+                }
+
+                // Group by host to support multi-CDN architectures
+                const hostAnalysis = aggregateHostCdn(resourceEvidenceList, finalUrl);
+
+                // Main document edge evidence
+                const mainRemoteIp = metricsResult.connection?.remoteIp || (mainDocumentResponse ? mainDocumentResponse.remoteIPAddress : null);
+                const mainRemotePort = mainDocumentResponse ? mainDocumentResponse.remotePort : null;
+                const mainEdge = extractEdgeEvidence(rawHeaders, cdnResult.provider, mainRemoteIp, mainRemotePort);
+                cdnResult.edge = mainEdge;
+                cdnResult.byHost = hostAnalysis.byHost;
+                cdnResult.allProviders = hostAnalysis.allProviders;
+
                 notifyProgress("Checking Security Headers...");
                 const securityResult = analyzeSecurity(finalUrl, mainDocumentResponse, rawHeaders);
 
@@ -337,6 +400,9 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress, cancelToken = null) 
                     tls: securityResult.tls,
                     securityHeaders: securityResult.headers,
                     cdn: cdnResult,
+                    cdnByHost: hostAnalysis.byHost,
+                    allProviders: hostAnalysis.allProviders,
+                    resourceEvidence: resourceEvidenceList,
                     cache: {
                         documentSource,
                         providerStatus: cacheProviderStatus
@@ -398,30 +464,55 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress, cancelToken = null) 
                     }
                 }
 
-                const entry = {
-                    url: params.request.url,
-                    type: params.type,
-                    requestWillBeSentTime: eventTimeMs,
-                    response: null,
-                    responseReceivedTime: null,
-                    loadingFinishedTime: null,
-                    encodedDataLength: 0,
-                    rawResponseHeaders: null,
-                    failed: false
-                };
-
-                // BUG-02 FIX: If ExtraInfo arrived before this request was
-                // registered, pull it from the buffer and attach it now.
-                if (extraInfoBuffer.has(reqId)) {
-                    entry.rawResponseHeaders = extraInfoBuffer.get(reqId);
-                    extraInfoBuffer.delete(reqId);
-                    // Also update the main document ExtraInfo store if applicable.
-                    if (params.type === 'Document') {
-                        mainExtraHeadersStore = entry.rawResponseHeaders;
+                let entry = requests.get(reqId);
+                if (entry) {
+                    if (params.redirectResponse) {
+                        if (!entry.redirects) entry.redirects = [];
+                        entry.redirects.push({
+                            url: entry.url,
+                            status: params.redirectResponse.status,
+                            headers: params.redirectResponse.headers || {},
+                            remoteIPAddress: params.redirectResponse.remoteIPAddress || null
+                        });
                     }
-                }
+                    entry.url = params.request.url;
+                    entry.type = params.type || entry.type;
+                } else {
+                    entry = {
+                        url: params.request.url,
+                        type: params.type,
+                        requestWillBeSentTime: eventTimeMs,
+                        response: null,
+                        responseReceivedTime: null,
+                        loadingFinishedTime: null,
+                        encodedDataLength: 0,
+                        rawResponseHeaders: null,
+                        failed: false,
+                        redirects: []
+                    };
 
-                requests.set(reqId, entry);
+                    if (params.redirectResponse) {
+                        entry.redirects.push({
+                            url: params.redirectResponse.url || params.request.url,
+                            status: params.redirectResponse.status,
+                            headers: params.redirectResponse.headers || {},
+                            remoteIPAddress: params.redirectResponse.remoteIPAddress || null
+                        });
+                    }
+
+                    // BUG-02 FIX: If ExtraInfo arrived before this request was
+                    // registered, pull it from the buffer and attach it now.
+                    if (extraInfoBuffer.has(reqId)) {
+                        entry.rawResponseHeaders = extraInfoBuffer.get(reqId);
+                        extraInfoBuffer.delete(reqId);
+                        // Also update the main document ExtraInfo store if applicable.
+                        if (params.type === 'Document') {
+                            mainExtraHeadersStore = entry.rawResponseHeaders;
+                        }
+                    }
+
+                    requests.set(reqId, entry);
+                }
 
             } else if (method === 'Network.responseReceived') {
                 const reqId = params.requestId;
