@@ -11,53 +11,119 @@
  */
 
 export function calculatePerformanceScore(ctx) {
-    const { isHttps, timing, cacheStatus, headers, failedRequestCount = 0, protocol = 'h2' } = ctx;
+    const {
+        isHttps,
+        timing = {},
+        cacheStatus = 'Unknown',
+        headers = {},
+        failedRequestCount = 0,
+        protocol = 'Unknown'
+    } = (ctx || {});
 
-    const loadTime = timing.loadEventMs ?? timing.documentMs;
-    const ttfb = timing.ttfbMs;
-    const compression = headers['content-encoding'] || "None";
-    const hasHSTS = !!headers['strict-transport-security'];
-    const hasCSP = !!headers['content-security-policy'];
+    // Guard all timing inputs against undefined, NaN, and negative values
+    const loadTime = (timing && Number.isFinite(timing.loadEventMs) && timing.loadEventMs >= 0)
+        ? timing.loadEventMs
+        : ((timing && Number.isFinite(timing.documentMs) && timing.documentMs >= 0) ? timing.documentMs : null);
 
-    // 1. Page Load Score (35%)
-    // BUG-21 FIX: null loadTime means "not measured" → neutral 50, not penalty 0.
-    let pageLoadScore = loadTime === null ? 50 : 100;
-    if (loadTime !== null && loadTime > 3500) pageLoadScore = 40;
-    else if (loadTime !== null && loadTime > 2000) pageLoadScore = 65;
-    else if (loadTime !== null && loadTime > 1000) pageLoadScore = 85;
-    else if (loadTime !== null && loadTime > 500) pageLoadScore = 95;
+    const ttfb = (timing && Number.isFinite(timing.ttfbMs) && timing.ttfbMs >= 0)
+        ? timing.ttfbMs
+        : null;
 
-    // 2. TTFB Score (25%)
-    // BUG-21 FIX: null ttfb means "not measured" → neutral 50, not penalty 0.
-    let ttfbScore = ttfb === null ? 50 : 100;
-    if (ttfb !== null && ttfb > 800) ttfbScore = 30;
-    else if (ttfb !== null && ttfb > 400) ttfbScore = 60;
-    else if (ttfb !== null && ttfb > 200) ttfbScore = 85;
+    // 1. Page Load Score (Weight: 35) - only scored when measurement is available
+    let pageLoadScore = null;
+    if (loadTime !== null) {
+        if (loadTime > 3500) pageLoadScore = 40;
+        else if (loadTime > 2000) pageLoadScore = 65;
+        else if (loadTime > 1000) pageLoadScore = 85;
+        else if (loadTime > 500) pageLoadScore = 95;
+        else pageLoadScore = 100;
+    }
 
-    // 3. Cache Score (20%)
-    let cacheScore = 70;
-    if (cacheStatus.includes('HIT')) cacheScore = 100;
-    else if (cacheStatus.includes('REVALIDATED')) cacheScore = 85;
-    else if (cacheStatus.includes('MISS')) cacheScore = 50;
-    else if (cacheStatus.includes('BYPASS') || cacheStatus.includes('DYNAMIC')) cacheScore = 60;
+    // 2. TTFB Score (Weight: 25) - only scored when measurement is available
+    let ttfbScore = null;
+    if (ttfb !== null) {
+        if (ttfb > 800) ttfbScore = 30;
+        else if (ttfb > 400) ttfbScore = 60;
+        else if (ttfb > 200) ttfbScore = 85;
+        else ttfbScore = 100;
+    }
 
-    // 4. Compression Score (10%)
-    let compressionScore = compression !== "None" ? 100 : 50;
+    // 3. Cache Score (Weight: 20) - only scored when cache evidence is available
+    let cacheScore = null;
+    const normCache = (typeof cacheStatus === 'string' && cacheStatus) ? cacheStatus : 'Unknown';
+    if (normCache !== 'Unknown') {
+        if (normCache.includes('HIT')) cacheScore = 100;
+        else if (normCache.includes('REVALIDATED')) cacheScore = 85;
+        else if (normCache.includes('Cacheable')) cacheScore = 75;
+        else if (normCache.includes('BYPASS') || normCache.includes('DYNAMIC')) cacheScore = 60;
+        else if (normCache.includes('MISS')) cacheScore = 50;
+        else if (normCache.includes('Not Cacheable')) cacheScore = 50;
+        else if (normCache === 'No Cache Headers') cacheScore = 40;
+        else cacheScore = 50;
+    }
 
-    // 5. Security Checks Score (10%)
-    let basicSecurityScore = (isHttps ? 40 : 0) + (hasHSTS ? 30 : 0) + (hasCSP ? 30 : 0);
+    // 4. Compression Score (Weight: 10)
+    // Only scored if compression was observed (either explicitly passed in ctx.compression,
+    // or via content-encoding in headers). If unobserved / missing, do NOT penalize.
+    let compressionScore = null;
+    let compressionVal = ctx.compression;
+    if (!compressionVal && headers && typeof headers === 'object') {
+        if ('content-encoding' in headers || 'Content-Encoding' in headers) {
+            compressionVal = headers['content-encoding'] || headers['Content-Encoding'];
+        }
+    }
 
-    // Apply penalty for failed network requests
+    if (compressionVal && compressionVal !== 'Unknown') {
+        if (String(compressionVal).toLowerCase() !== 'none') {
+            compressionScore = 100;
+        } else {
+            compressionScore = 50;
+        }
+    }
+
+    // 5. Basic Security Score (Weight: 10) - kept conceptually separate in results
+    const hasHttps = Boolean(isHttps);
+    const hasHSTS = Boolean(headers && (headers['strict-transport-security'] || headers['Strict-Transport-Security']));
+    const hasCSP = Boolean(headers && (headers['content-security-policy'] || headers['Content-Security-Policy']));
+    const basicSecurityScore = (hasHttps ? 40 : 0) + (hasHSTS ? 30 : 0) + (hasCSP ? 30 : 0);
+
+    // Dynamic reweighting across applicable components so missing data is never penalized
+    let totalWeight = 0;
+    let weightedSum = 0;
+
+    if (pageLoadScore !== null) {
+        weightedSum += pageLoadScore * 0.35;
+        totalWeight += 0.35;
+    }
+    if (ttfbScore !== null) {
+        weightedSum += ttfbScore * 0.25;
+        totalWeight += 0.25;
+    }
+    if (cacheScore !== null) {
+        weightedSum += cacheScore * 0.20;
+        totalWeight += 0.20;
+    }
+    if (compressionScore !== null) {
+        weightedSum += compressionScore * 0.10;
+        totalWeight += 0.10;
+    }
+    // Security check is applicable whenever security metadata is provided
+    if (isHttps !== undefined && isHttps !== null) {
+        weightedSum += basicSecurityScore * 0.10;
+        totalWeight += 0.10;
+    }
+
     let penalty = 0;
-    if (failedRequestCount > 0) penalty += Math.min(20, failedRequestCount * 5);
+    if (failedRequestCount > 0 && Number.isFinite(failedRequestCount)) {
+        penalty = Math.min(20, Math.max(0, failedRequestCount * 5));
+    }
 
-    const overallScore = Math.max(1, Math.min(100, Math.round(
-        ((pageLoadScore * 0.35) +
-        (ttfbScore * 0.25) +
-        (cacheScore * 0.20) +
-        (compressionScore * 0.10) +
-        (basicSecurityScore * 0.10)) - penalty
-    )));
+    let rawScore = 75; // Neutral baseline if no applicable components
+    if (totalWeight > 0) {
+        rawScore = (weightedSum / totalWeight) - penalty;
+    }
+
+    const overallScore = Math.max(1, Math.min(100, Math.round(Number.isFinite(rawScore) ? rawScore : 75)));
 
     let grade = 'A+';
     if (overallScore >= 95) grade = 'A+';
@@ -70,14 +136,22 @@ export function calculatePerformanceScore(ctx) {
     return {
         score: overallScore,
         grade,
-        scoreVersion: "2.0",
-        completeness: 1.0,
+        scoreVersion: "2.1",
+        completeness: Math.round(totalWeight * 100) / 100,
+        securityScore: basicSecurityScore,
         components: {
-            pageLoad: pageLoadScore,
-            ttfb: ttfbScore,
-            cache: cacheScore,
-            compression: compressionScore,
+            pageLoad: pageLoadScore ?? 50,
+            ttfb: ttfbScore ?? 50,
+            cache: cacheScore ?? 50,
+            compression: compressionScore ?? 50,
             basicSecurity: basicSecurityScore
+        },
+        applicableComponents: {
+            pageLoad: pageLoadScore !== null,
+            ttfb: ttfbScore !== null,
+            cache: cacheScore !== null,
+            compression: compressionScore !== null,
+            basicSecurity: isHttps !== undefined && isHttps !== null
         }
     };
 }

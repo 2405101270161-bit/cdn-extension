@@ -417,86 +417,165 @@ export function detectCdnProvider(rawHeaders = {}) {
     };
 }
 
-export function extractCacheStatus(headers = {}) {
-    let rawCacheVal = "";
-    let cacheHeaderName = "";
+/**
+ * Decomposes cache evidence into distinct, explicit categories:
+ *  A. Browser HTTP cache (memory, disk, prefetch from CDP)
+ *  B. Service-worker responses
+ *  C. CDN or intermediary edge cache status (cf-cache-status, x-cache, etc.)
+ *  D. Cache policy (Cache-Control, Age, Expires)
+ *  E. Summary status for backwards compatibility
+ *
+ * Never infers a CDN cache HIT from Age or Cache-Control max-age/public.
+ */
+export function analyzeCacheDetails(rawHeaders = {}, cdpContext = {}) {
+    const headers = normalizeHeaders(rawHeaders);
 
-    // Check CDN-specific cache status headers first (highest confidence)
+    // A. Browser HTTP Cache Evidence
+    const fromDiskCache = Boolean(cdpContext && cdpContext.fromDiskCache);
+    const fromMemoryCache = Boolean(cdpContext && (cdpContext.fromMemoryCache || cdpContext.servedFromCache));
+    const fromPrefetchCache = Boolean(cdpContext && cdpContext.fromPrefetchCache);
+    const browserCacheType = fromDiskCache ? 'disk' : (fromMemoryCache ? 'memory' : (fromPrefetchCache ? 'prefetch' : null));
+    const browserCache = {
+        servedFromCache: Boolean(browserCacheType),
+        type: browserCacheType,
+        evidence: browserCacheType ? `cdp:from-${browserCacheType}-cache` : null
+    };
+
+    // B. Service-Worker responses (not CDN hits)
+    const fromServiceWorker = Boolean(cdpContext && cdpContext.fromServiceWorker);
+    const serviceWorker = {
+        fulfilledByServiceWorker: fromServiceWorker,
+        evidence: fromServiceWorker ? 'cdp:fromServiceWorker' : null
+    };
+
+    // C. CDN or Intermediary Edge Cache Status
+    let cdnStatus = "NONE";
+    let cdnHeader = null;
+    let cdnRawVal = null;
+    let cdnEvidence = null;
+
     if (headers['cf-cache-status']) {
-        cacheHeaderName = 'cf-cache-status';
-        rawCacheVal = headers['cf-cache-status'];
+        cdnHeader = 'cf-cache-status';
+        cdnRawVal = String(headers['cf-cache-status']).trim();
     } else if (headers['x-cache']) {
-        cacheHeaderName = 'x-cache';
-        rawCacheVal = headers['x-cache'];
+        cdnHeader = 'x-cache';
+        cdnRawVal = String(headers['x-cache']).trim();
     } else if (headers['x-cache-hits']) {
-        cacheHeaderName = 'x-cache-hits';
-        rawCacheVal = parseInt(headers['x-cache-hits'], 10) > 0 ? "HIT" : "MISS";
+        cdnHeader = 'x-cache-hits';
+        cdnRawVal = String(headers['x-cache-hits']).trim();
     } else if (headers['x-vercel-cache']) {
-        cacheHeaderName = 'x-vercel-cache';
-        rawCacheVal = headers['x-vercel-cache'];
+        cdnHeader = 'x-vercel-cache';
+        cdnRawVal = String(headers['x-vercel-cache']).trim();
     } else if (headers['x-nf-cache-status']) {
-        cacheHeaderName = 'x-nf-cache-status';
-        rawCacheVal = headers['x-nf-cache-status'];
+        cdnHeader = 'x-nf-cache-status';
+        cdnRawVal = String(headers['x-nf-cache-status']).trim();
     } else if (headers['cdn-cache']) {
-        cacheHeaderName = 'cdn-cache';
-        rawCacheVal = headers['cdn-cache'];
+        cdnHeader = 'cdn-cache';
+        cdnRawVal = String(headers['cdn-cache']).trim();
+    } else if (headers['x-akamai-cache-status']) {
+        cdnHeader = 'x-akamai-cache-status';
+        cdnRawVal = String(headers['x-akamai-cache-status']).trim();
     }
 
-    let status = "";
-    const valUpper = rawCacheVal.toUpperCase();
+    if (cdnHeader && cdnRawVal) {
+        cdnEvidence = `${cdnHeader}: ${cdnRawVal}`;
+        const valUpper = cdnRawVal.toUpperCase();
 
-    if (valUpper.includes('HIT')) {
-        status = "HIT";
-    } else if (valUpper.includes('EXPIRED')) {
-        status = "EXPIRED";
-    } else if (valUpper.includes('REVALIDATED')) {
-        status = "REVALIDATED";
-    } else if (valUpper.includes('STALE')) {
-        status = "STALE";
-    } else if (valUpper.includes('DYNAMIC')) {
-        status = "BYPASS";
-    } else if (valUpper.includes('BYPASS')) {
-        status = "BYPASS";
-    } else if (valUpper.includes('MISS')) {
-        status = "MISS";
-    }
-
-    // BUG-17 FIX: Cache-Control directives declare cacheability POLICY — they
-    // do NOT indicate whether the CDN actually served a cached response.
-    // Old code mapped max-age/public → "HIT" which was semantically wrong and
-    // caused non-CDN sites to show a false cache hit status.
-    //
-    // Correct mapping:
-    //   no-store / no-cache  → "Not Cacheable"
-    //   public / max-age / s-maxage → "Cacheable"  (policy allows caching)
-    //   age > 0 (without CDN header) → "Cached (Browser/Proxy)"
-    //   any other cache-related header present → "Unknown"
-    //   nothing relevant     → "No Cache Headers"
-    if (!status) {
-        if (headers['age'] && parseInt(headers['age'], 10) > 0) {
-            cacheHeaderName = 'age';
-            status = "Cached (Browser/Proxy)";
-        } else if (headers['cache-control']) {
-            const cc = headers['cache-control'].toLowerCase();
-            cacheHeaderName = 'cache-control';
-            if (cc.includes('no-store') || cc.includes('no-cache')) {
-                status = "Not Cacheable";
-            } else if (cc.includes('max-age') || cc.includes('s-maxage') || cc.includes('public')) {
-                status = "Cacheable";
+        if (cdnHeader === 'x-cache-hits') {
+            const hits = parseInt(cdnRawVal, 10);
+            cdnStatus = (!isNaN(hits) && hits > 0) ? "HIT" : "MISS";
+        } else if (valUpper.includes('HIT')) {
+            if (valUpper.includes('REFRESH') || valUpper.includes('REVALIDATED')) {
+                cdnStatus = "REVALIDATED";
+            } else {
+                cdnStatus = "HIT";
             }
+        } else if (valUpper.includes('EXPIRED')) {
+            cdnStatus = "EXPIRED";
+        } else if (valUpper.includes('REVALIDATED')) {
+            cdnStatus = "REVALIDATED";
+        } else if (valUpper.includes('STALE') || valUpper.includes('UPDATING')) {
+            cdnStatus = "STALE";
+        } else if (valUpper.includes('BYPASS') || valUpper.includes('DYNAMIC')) {
+            cdnStatus = "BYPASS";
+        } else if (valUpper.includes('MISS')) {
+            cdnStatus = "MISS";
+        } else {
+            cdnStatus = "UNKNOWN";
         }
     }
 
-    if (!status) {
-        const hasCacheRelatedHeader = headers['cache-control'] || headers['expires'] ||
-            headers['etag'] || headers['last-modified'] || headers['pragma'];
-        status = hasCacheRelatedHeader ? "Unknown" : "No Cache Headers";
+    const cdnCache = {
+        status: cdnStatus,
+        header: cdnHeader,
+        rawValue: cdnRawVal,
+        evidence: cdnEvidence
+    };
+
+    // D. Cache Policy (Cache-Control, Expires, Age)
+    const cacheControl = headers['cache-control'] ? String(headers['cache-control']).toLowerCase() : null;
+    const pragma = headers['pragma'] ? String(headers['pragma']).toLowerCase() : null;
+    const expires = headers['expires'] || null;
+    const ageRaw = headers['age'] || null;
+    let ageSeconds = null;
+    if (ageRaw && /^\d+$/.test(String(ageRaw).trim())) {
+        ageSeconds = parseInt(String(ageRaw).trim(), 10);
     }
 
-    console.log(`[Cache Debug] Cache Header: ${cacheHeaderName}=${rawCacheVal || 'N/A'}`);
-    console.log(`[Cache Debug] Detected: ${status}`);
+    let policyStatus = "No Cache Directives";
+    const directives = [];
+    if (cacheControl) {
+        directives.push(...cacheControl.split(',').map(s => s.trim()).filter(Boolean));
+        if (cacheControl.includes('no-store') || cacheControl.includes('no-cache')) {
+            policyStatus = "Not Cacheable";
+        } else if (cacheControl.includes('max-age') || cacheControl.includes('s-maxage') || cacheControl.includes('public')) {
+            policyStatus = "Cacheable";
+        } else if (cacheControl.includes('private')) {
+            policyStatus = "Private Cacheable";
+        }
+    } else if (expires) {
+        policyStatus = "Cacheable (Expires)";
+    }
 
-    return status;
+    const cachePolicy = {
+        status: policyStatus,
+        cacheControl,
+        directives,
+        expires,
+        ageSeconds,
+        hasValidation: Boolean(headers['etag'] || headers['last-modified'])
+    };
+
+    // E. Backwards-compatible summary status
+    let summary = "Unknown";
+    if (cdnCache.status !== "NONE" && cdnCache.status !== "UNKNOWN") {
+        summary = cdnCache.status;
+    } else if (serviceWorker.fulfilledByServiceWorker) {
+        summary = "Service Worker";
+    } else if (browserCache.servedFromCache) {
+        summary = browserCache.type === 'memory' ? "Memory Cache" : "Disk Cache";
+    } else if (policyStatus === "Not Cacheable") {
+        summary = "Not Cacheable";
+    } else if (policyStatus.startsWith("Cacheable")) {
+        summary = "Cacheable";
+    } else if (cacheControl || expires || ageRaw || headers['etag'] || headers['last-modified'] || pragma) {
+        summary = "Unknown";
+    } else {
+        summary = "No Cache Headers";
+    }
+
+    return {
+        browserCache,
+        serviceWorker,
+        cdnCache,
+        policy: cachePolicy,
+        summary
+    };
+}
+
+export function extractCacheStatus(headers = {}, cdpContext = {}) {
+    const analysis = analyzeCacheDetails(headers, cdpContext);
+    return analysis.summary;
 }
 
 /**

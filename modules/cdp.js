@@ -20,6 +20,7 @@
 import {
     detectCdnProvider,
     extractCacheStatus,
+    analyzeCacheDetails,
     detectResourceCdn,
     extractEdgeEvidence,
     aggregateHostCdn,
@@ -292,7 +293,8 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress, cancelToken = null) 
                 }
 
                 const cdnResult = detectCdnProvider(rawHeaders);
-                const cacheProviderStatus = extractCacheStatus(rawHeaders);
+                const mainCacheDetails = analyzeCacheDetails(rawHeaders, mainDocumentResponse);
+                const cacheProviderStatus = mainCacheDetails.summary;
 
                 // Per-resource response collection and CDN/Edge detection
                 const resourceEvidenceList = [];
@@ -318,7 +320,8 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress, cancelToken = null) 
                     const statusCode = req.response?.status || (req.failed ? 0 : 200);
 
                     const resourceCdn = detectResourceCdn(cleanHeaders, req.url, req.type, remoteIp, remotePort);
-                    const resourceCache = extractCacheStatus(cleanHeaders);
+                    const resourceCacheDetails = analyzeCacheDetails(cleanHeaders, req.response);
+                    const resourceCache = resourceCacheDetails.summary;
 
                     resourceEvidenceList.push({
                         requestId: reqId,
@@ -331,11 +334,13 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress, cancelToken = null) 
                         remotePort,
                         encodedDataLength: req.encodedDataLength || 0,
                         failed: req.failed || false,
+                        canceled: req.canceled || false,
                         redirects: req.redirects || [],
                         headers: cleanHeaders,
                         cdn: resourceCdn,
                         edge: resourceCdn.edge,
-                        cacheStatus: resourceCache
+                        cacheStatus: resourceCache,
+                        cacheDetails: resourceCacheDetails
                     });
                 }
 
@@ -361,6 +366,7 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress, cancelToken = null) 
                     timing: metricsResult.timing,
                     cacheStatus: cacheProviderStatus,
                     headers: rawHeaders,
+                    compression: metricsResult.connection.compression,
                     failedRequestCount: resourcesResult.failedRequestCount,
                     protocol: metricsResult.connection.protocol
                 });
@@ -391,7 +397,11 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress, cancelToken = null) 
                     transfer: {
                         requestCount: resourcesResult.requestCount,
                         failedRequestCount: resourcesResult.failedRequestCount,
+                        canceledRequestCount: resourcesResult.canceledRequestCount,
+                        cachedRequestCount: resourcesResult.cachedRequestCount,
+                        serviceWorkerRequestCount: resourcesResult.serviceWorkerRequestCount,
                         encodedBytes: resourcesResult.encodedBytes,
+                        decodedBytes: resourcesResult.decodedBytes,
                         firstPartyCount: resourcesResult.firstPartyCount,
                         thirdPartyCount: resourcesResult.thirdPartyCount,
                         breakdown: resourcesResult.breakdown
@@ -405,7 +415,8 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress, cancelToken = null) 
                     resourceEvidence: resourceEvidenceList,
                     cache: {
                         documentSource,
-                        providerStatus: cacheProviderStatus
+                        providerStatus: cacheProviderStatus,
+                        details: mainCacheDetails
                     },
                     scoreDetails,
                     suggestions,
@@ -548,6 +559,16 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress, cancelToken = null) 
                     }
                 }
 
+            } else if (method === 'Network.requestServedFromCache') {
+                const reqId = params.requestId;
+                const reqData = requests.get(reqId);
+                if (reqData) {
+                    reqData.servedFromCache = true;
+                    if (reqData.response) {
+                        reqData.response.fromMemoryCache = true;
+                    }
+                }
+
             } else if (method === 'Network.loadingFinished') {
                 const reqId = params.requestId;
                 const reqData = requests.get(reqId);
@@ -561,19 +582,12 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress, cancelToken = null) 
                 const reqId = params.requestId;
                 const reqData = requests.get(reqId);
                 if (reqData) {
-                    // BUG-05 FIX: Only mark as truly failed when:
-                    //   (a) The request was explicitly cancelled/aborted by the browser
-                    //       (params.canceled or net::ERR_ABORTED) — these are benign
-                    //       navigational artifacts and must NOT be counted.
-                    //   (b) The request has no prior response recorded at all, meaning
-                    //       it failed at the network level before any response arrived.
-                    //   (c) The request has a prior response but with HTTP status >= 400.
-                    //
-                    // This prevents streaming/media resources that finish normally
-                    // from being counted as failures ("Failed=1, HTTP Status=200").
-                    const isCanceled = params.canceled || params.errorText === 'net::ERR_ABORTED';
+                    // Distinguish user/browser cancelled requests from network failures
+                    const isCanceled = Boolean(params.canceled || params.errorText === 'net::ERR_ABORTED');
+                    reqData.canceled = isCanceled;
+
                     if (isCanceled) {
-                        // Benign browser-cancelled request — not a real failure.
+                        // Benign browser-cancelled request — not an unexpected failure.
                         reqData.failed = false;
                     } else {
                         const existingStatus = reqData.response ? reqData.response.status : null;

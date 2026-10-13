@@ -500,7 +500,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     <div class="site-meta">
                         <span class="pill ${isHttps ? 'good' : 'bad'}">${icon('shield')}${isHttps ? 'HTTPS' : 'HTTP'}</span>
                         <span class="pill ${data.statusCode >= 400 ? 'bad' : 'good'}">${icon('checkCircle')}${data.statusCode || 200}</span>
-                        <span class="pill">${icon('bolt')}${escapeHtml(connection.protocol || 'h2')}</span>
+                        <span class="pill">${icon('bolt')}${escapeHtml(connection.protocol || 'Unknown')}</span>
                         <span class="pill accent">${icon('cloud')}${escapeHtml(providerName)}</span>
                     </div>
                 </div>
