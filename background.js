@@ -93,7 +93,7 @@ export async function clearAnalysisState() {
  * Starts a strictly tracked analysis session with generation isolation.
  * Automatically invalidates and safely cleans up any previous or pending analysis.
  */
-async function startTrackedAnalysis(options) {
+export async function startTrackedAnalysis(options) {
     const rawUrl = options?.url ? String(options.url).trim() : '';
     if (!rawUrl) {
         return {
@@ -293,7 +293,7 @@ async function startTrackedAnalysis(options) {
  * Returns the currently running analysis state, or null if idle/completed.
  * Stale or timed-out analyses (>15s) are automatically cleared.
  */
-async function getStoredAnalysisState() {
+export async function getStoredAnalysisState() {
     if (currentAnalysisState && currentAnalysisState.status === 'running') {
         const elapsed = Date.now() - new Date(currentAnalysisState.startedAt).getTime();
         if (elapsed > 15000) {

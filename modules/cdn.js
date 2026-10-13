@@ -86,7 +86,8 @@ function testProvider(name, highSignals, mediumSignals, headers, server, via, xP
 
     for (const { key, test, label } of highSignals) {
         const val = headers[key];
-        if (val !== undefined && (test === undefined || test(val, { server, via, xPoweredBy }))) {
+        const hasVal = val !== undefined && val !== null && String(val).trim().length > 0;
+        if (hasVal && (test === undefined || test(val, { server, via, xPoweredBy }))) {
             evidence.push(label ? label(val) : `${key}: ${String(val).slice(0, 32)}`);
             confidence = 'high';
         }
