@@ -17,20 +17,36 @@
  *          epoch baseline.
  */
 
-import { detectCdnProvider, extractCacheStatus } from './cdn.js';
+import {
+    detectCdnProvider,
+    extractCacheStatus,
+    analyzeCacheDetails,
+    detectResourceCdn,
+    extractEdgeEvidence,
+    aggregateHostCdn,
+    scrubSensitiveHeaders
+} from './cdn.js';
 import { analyzeSecurity } from './security.js';
 import { analyzeResources } from './resources.js';
 import { calculateMetrics } from './metrics.js';
 import { calculatePerformanceScore, generateSuggestions } from './scoring.js';
 
-export async function executeCdpAnalysis(targetUrl, notifyProgress) {
+export async function executeCdpAnalysis(targetUrl, notifyProgress, cancelToken = null) {
     let tempTabId = null;
     let debuggerAttached = false;
 
     try {
+        if (cancelToken?.isCancelled) {
+            throw new Error("Analysis was cancelled.");
+        }
+
         notifyProgress("Validating URL...");
         if (!targetUrl || !/^https?:\/\//i.test(targetUrl)) {
             throw new Error("Invalid URL scheme. Please enter a valid http:// or https:// website URL.");
+        }
+
+        if (cancelToken?.isCancelled) {
+            throw new Error("Analysis was cancelled.");
         }
 
         notifyProgress("Creating Background Analysis Tab...");
@@ -39,6 +55,13 @@ export async function executeCdpAnalysis(targetUrl, notifyProgress) {
             active: false
         });
         tempTabId = bgTab.id;
+        if (cancelToken) {
+            cancelToken.tabId = tempTabId;
+        }
+
+        if (cancelToken?.isCancelled) {
+            throw new Error("Analysis was cancelled.");
+        }
 
         if (!tempTabId) {
             throw new Error("Failed to create background tab for analysis.");
@@ -48,8 +71,16 @@ export async function executeCdpAnalysis(targetUrl, notifyProgress) {
         await chrome.debugger.attach({ tabId: tempTabId }, "1.3");
         debuggerAttached = true;
 
+        if (cancelToken?.isCancelled) {
+            throw new Error("Analysis was cancelled.");
+        }
+
         notifyProgress("Loading Website...");
-        const rawReport = await captureCdpEvents(tempTabId, targetUrl, notifyProgress);
+        const rawReport = await captureCdpEvents(tempTabId, targetUrl, notifyProgress, cancelToken);
+
+        if (cancelToken?.isCancelled) {
+            throw new Error("Analysis was cancelled.");
+        }
 
         notifyProgress("Generating Report...");
         return {
@@ -58,12 +89,22 @@ export async function executeCdpAnalysis(targetUrl, notifyProgress) {
         };
 
     } catch (err) {
+        if (cancelToken?.isCancelled) {
+            return {
+                success: false,
+                cancelled: true,
+                error: "Analysis was cancelled."
+            };
+        }
         console.error("[CDP Engine v2] Error during analysis:", err);
         return {
             success: false,
             error: err.message || "Background analysis failed."
         };
     } finally {
+        if (cancelToken && cancelToken.tabId === tempTabId) {
+            cancelToken.tabId = null;
+        }
         if (debuggerAttached && tempTabId) {
             await chrome.debugger.detach({ tabId: tempTabId }).catch(() => {});
         }
@@ -95,7 +136,7 @@ function cdpSend(tabId, method, params = {}, timeoutMs = 4000) {
     });
 }
 
-function captureCdpEvents(tabId, targetUrl, notifyProgress) {
+function captureCdpEvents(tabId, targetUrl, notifyProgress, cancelToken = null) {
     return new Promise(async (resolve, reject) => {
         let isResolved = false;
 
@@ -140,6 +181,24 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress) {
             chrome.debugger.onEvent.removeListener(cdpEventListener);
             chrome.debugger.onDetach.removeListener(detachListener);
             chrome.tabs.onRemoved.removeListener(tabRemovedListener);
+            if (cancelToken) {
+                cancelToken.onCancel = null;
+            }
+        }
+
+        if (cancelToken) {
+            cancelToken.onCancel = () => {
+                if (isResolved) return;
+                isResolved = true;
+                if (timeoutTimer) clearTimeout(timeoutTimer);
+                if (idleTimer) clearTimeout(idleTimer);
+                if (postLoadCapTimer) clearTimeout(postLoadCapTimer);
+                if (domContentCapTimer) clearTimeout(domContentCapTimer);
+                cleanupListeners();
+                requests.clear();
+                extraInfoBuffer.clear();
+                reject(new Error("Analysis cancelled"));
+            };
         }
 
         function detachListener(source, reason) {
@@ -170,6 +229,18 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress) {
 
         function finishAnalysis(reason = "complete") {
             if (isResolved) return;
+            if (cancelToken?.isCancelled) {
+                isResolved = true;
+                if (timeoutTimer) clearTimeout(timeoutTimer);
+                if (idleTimer) clearTimeout(idleTimer);
+                if (postLoadCapTimer) clearTimeout(postLoadCapTimer);
+                if (domContentCapTimer) clearTimeout(domContentCapTimer);
+                cleanupListeners();
+                requests.clear();
+                extraInfoBuffer.clear();
+                reject(new Error("Analysis cancelled"));
+                return;
+            }
             isResolved = true;
 
             if (timeoutTimer) clearTimeout(timeoutTimer);
@@ -222,7 +293,67 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress) {
                 }
 
                 const cdnResult = detectCdnProvider(rawHeaders);
-                const cacheProviderStatus = extractCacheStatus(rawHeaders);
+                const mainCacheDetails = analyzeCacheDetails(rawHeaders, mainDocumentResponse);
+                const cacheProviderStatus = mainCacheDetails.summary;
+
+                // Per-resource response collection and CDN/Edge detection
+                const resourceEvidenceList = [];
+                for (const [reqId, req] of requests.entries()) {
+                    if (!req.url || !/^https?:\/\//i.test(req.url)) continue;
+
+                    const mergedHeaders = {};
+                    if (req.response && req.response.headers) {
+                        for (const [k, v] of Object.entries(req.response.headers)) {
+                            mergedHeaders[k.toLowerCase()] = String(v);
+                        }
+                    }
+                    if (req.rawResponseHeaders) {
+                        for (const [k, v] of Object.entries(req.rawResponseHeaders)) {
+                            mergedHeaders[k.toLowerCase()] = String(v);
+                        }
+                    }
+
+                    const cleanHeaders = scrubSensitiveHeaders(mergedHeaders);
+                    const remoteIp = req.response?.remoteIPAddress || null;
+                    const remotePort = req.response?.remotePort || null;
+                    const protocol = req.response?.protocol || null;
+                    const statusCode = req.response?.status || (req.failed ? 0 : 200);
+
+                    const resourceCdn = detectResourceCdn(cleanHeaders, req.url, req.type, remoteIp, remotePort);
+                    const resourceCacheDetails = analyzeCacheDetails(cleanHeaders, req.response);
+                    const resourceCache = resourceCacheDetails.summary;
+
+                    resourceEvidenceList.push({
+                        requestId: reqId,
+                        url: req.url,
+                        hostname: resourceCdn.hostname,
+                        resourceType: req.type || 'Other',
+                        statusCode,
+                        protocol,
+                        remoteIPAddress: remoteIp,
+                        remotePort,
+                        encodedDataLength: req.encodedDataLength || 0,
+                        failed: req.failed || false,
+                        canceled: req.canceled || false,
+                        redirects: req.redirects || [],
+                        headers: cleanHeaders,
+                        cdn: resourceCdn,
+                        edge: resourceCdn.edge,
+                        cacheStatus: resourceCache,
+                        cacheDetails: resourceCacheDetails
+                    });
+                }
+
+                // Group by host to support multi-CDN architectures
+                const hostAnalysis = aggregateHostCdn(resourceEvidenceList, finalUrl);
+
+                // Main document edge evidence
+                const mainRemoteIp = metricsResult.connection?.remoteIp || (mainDocumentResponse ? mainDocumentResponse.remoteIPAddress : null);
+                const mainRemotePort = mainDocumentResponse ? mainDocumentResponse.remotePort : null;
+                const mainEdge = extractEdgeEvidence(rawHeaders, cdnResult.provider, mainRemoteIp, mainRemotePort);
+                cdnResult.edge = mainEdge;
+                cdnResult.byHost = hostAnalysis.byHost;
+                cdnResult.allProviders = hostAnalysis.allProviders;
 
                 notifyProgress("Checking Security Headers...");
                 const securityResult = analyzeSecurity(finalUrl, mainDocumentResponse, rawHeaders);
@@ -235,6 +366,7 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress) {
                     timing: metricsResult.timing,
                     cacheStatus: cacheProviderStatus,
                     headers: rawHeaders,
+                    compression: metricsResult.connection.compression,
                     failedRequestCount: resourcesResult.failedRequestCount,
                     protocol: metricsResult.connection.protocol
                 });
@@ -255,7 +387,7 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress) {
                     mainDocumentResponse.fromPrefetchCache ? 'prefetch' : 'network'
                 ) : 'network';
 
-                resolve({
+                const finalResult = {
                     schemaVersion: 2,
                     requestedUrl,
                     finalUrl,
@@ -265,7 +397,11 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress) {
                     transfer: {
                         requestCount: resourcesResult.requestCount,
                         failedRequestCount: resourcesResult.failedRequestCount,
+                        canceledRequestCount: resourcesResult.canceledRequestCount,
+                        cachedRequestCount: resourcesResult.cachedRequestCount,
+                        serviceWorkerRequestCount: resourcesResult.serviceWorkerRequestCount,
                         encodedBytes: resourcesResult.encodedBytes,
+                        decodedBytes: resourcesResult.decodedBytes,
                         firstPartyCount: resourcesResult.firstPartyCount,
                         thirdPartyCount: resourcesResult.thirdPartyCount,
                         breakdown: resourcesResult.breakdown
@@ -274,15 +410,24 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress) {
                     tls: securityResult.tls,
                     securityHeaders: securityResult.headers,
                     cdn: cdnResult,
+                    cdnByHost: hostAnalysis.byHost,
+                    allProviders: hostAnalysis.allProviders,
+                    resourceEvidence: resourceEvidenceList,
                     cache: {
                         documentSource,
-                        providerStatus: cacheProviderStatus
+                        providerStatus: cacheProviderStatus,
+                        details: mainCacheDetails
                     },
                     scoreDetails,
                     suggestions,
                     timestamp: new Date().toISOString()
-                });
+                };
+                requests.clear();
+                extraInfoBuffer.clear();
+                resolve(finalResult);
             } catch (err) {
+                requests.clear();
+                extraInfoBuffer.clear();
                 reject(err);
             }
         }
@@ -330,30 +475,55 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress) {
                     }
                 }
 
-                const entry = {
-                    url: params.request.url,
-                    type: params.type,
-                    requestWillBeSentTime: eventTimeMs,
-                    response: null,
-                    responseReceivedTime: null,
-                    loadingFinishedTime: null,
-                    encodedDataLength: 0,
-                    rawResponseHeaders: null,
-                    failed: false
-                };
-
-                // BUG-02 FIX: If ExtraInfo arrived before this request was
-                // registered, pull it from the buffer and attach it now.
-                if (extraInfoBuffer.has(reqId)) {
-                    entry.rawResponseHeaders = extraInfoBuffer.get(reqId);
-                    extraInfoBuffer.delete(reqId);
-                    // Also update the main document ExtraInfo store if applicable.
-                    if (params.type === 'Document') {
-                        mainExtraHeadersStore = entry.rawResponseHeaders;
+                let entry = requests.get(reqId);
+                if (entry) {
+                    if (params.redirectResponse) {
+                        if (!entry.redirects) entry.redirects = [];
+                        entry.redirects.push({
+                            url: entry.url,
+                            status: params.redirectResponse.status,
+                            headers: params.redirectResponse.headers || {},
+                            remoteIPAddress: params.redirectResponse.remoteIPAddress || null
+                        });
                     }
-                }
+                    entry.url = params.request.url;
+                    entry.type = params.type || entry.type;
+                } else {
+                    entry = {
+                        url: params.request.url,
+                        type: params.type,
+                        requestWillBeSentTime: eventTimeMs,
+                        response: null,
+                        responseReceivedTime: null,
+                        loadingFinishedTime: null,
+                        encodedDataLength: 0,
+                        rawResponseHeaders: null,
+                        failed: false,
+                        redirects: []
+                    };
 
-                requests.set(reqId, entry);
+                    if (params.redirectResponse) {
+                        entry.redirects.push({
+                            url: params.redirectResponse.url || params.request.url,
+                            status: params.redirectResponse.status,
+                            headers: params.redirectResponse.headers || {},
+                            remoteIPAddress: params.redirectResponse.remoteIPAddress || null
+                        });
+                    }
+
+                    // BUG-02 FIX: If ExtraInfo arrived before this request was
+                    // registered, pull it from the buffer and attach it now.
+                    if (extraInfoBuffer.has(reqId)) {
+                        entry.rawResponseHeaders = extraInfoBuffer.get(reqId);
+                        extraInfoBuffer.delete(reqId);
+                        // Also update the main document ExtraInfo store if applicable.
+                        if (params.type === 'Document') {
+                            mainExtraHeadersStore = entry.rawResponseHeaders;
+                        }
+                    }
+
+                    requests.set(reqId, entry);
+                }
 
             } else if (method === 'Network.responseReceived') {
                 const reqId = params.requestId;
@@ -389,6 +559,16 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress) {
                     }
                 }
 
+            } else if (method === 'Network.requestServedFromCache') {
+                const reqId = params.requestId;
+                const reqData = requests.get(reqId);
+                if (reqData) {
+                    reqData.servedFromCache = true;
+                    if (reqData.response) {
+                        reqData.response.fromMemoryCache = true;
+                    }
+                }
+
             } else if (method === 'Network.loadingFinished') {
                 const reqId = params.requestId;
                 const reqData = requests.get(reqId);
@@ -402,19 +582,12 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress) {
                 const reqId = params.requestId;
                 const reqData = requests.get(reqId);
                 if (reqData) {
-                    // BUG-05 FIX: Only mark as truly failed when:
-                    //   (a) The request was explicitly cancelled/aborted by the browser
-                    //       (params.canceled or net::ERR_ABORTED) — these are benign
-                    //       navigational artifacts and must NOT be counted.
-                    //   (b) The request has no prior response recorded at all, meaning
-                    //       it failed at the network level before any response arrived.
-                    //   (c) The request has a prior response but with HTTP status >= 400.
-                    //
-                    // This prevents streaming/media resources that finish normally
-                    // from being counted as failures ("Failed=1, HTTP Status=200").
-                    const isCanceled = params.canceled || params.errorText === 'net::ERR_ABORTED';
+                    // Distinguish user/browser cancelled requests from network failures
+                    const isCanceled = Boolean(params.canceled || params.errorText === 'net::ERR_ABORTED');
+                    reqData.canceled = isCanceled;
+
                     if (isCanceled) {
-                        // Benign browser-cancelled request — not a real failure.
+                        // Benign browser-cancelled request — not an unexpected failure.
                         reqData.failed = false;
                     } else {
                         const existingStatus = reqData.response ? reqData.response.status : null;
@@ -445,6 +618,13 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress) {
             mainNavigationStart = performance.now();
             await cdpSend(tabId, "Page.navigate", { url: targetUrl });
         } catch (err) {
+            if (cancelToken?.isCancelled) {
+                cleanupListeners();
+                requests.clear();
+                extraInfoBuffer.clear();
+                reject(new Error("Analysis cancelled"));
+                return;
+            }
             console.warn("[CDP Engine v2] Page.navigate returned error:", err.message);
             if (mainDocumentResponse || requests.size > 0) {
                 if (!idleTimer) {
@@ -454,6 +634,8 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress) {
                 }
             } else {
                 cleanupListeners();
+                requests.clear();
+                extraInfoBuffer.clear();
                 reject(err);
             }
         }
