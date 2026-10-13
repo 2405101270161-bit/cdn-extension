@@ -526,7 +526,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 <!-- Quick stats -->
                 <div class="stats-grid">
-                    ${statCard('cloud', 'CDN', escapeHtml(providerName), `${escapeHtml(cdn.confidence || 'none')} confidence`)}
+                    ${statCard('cloud', 'CDN', escapeHtml(providerName), `${escapeHtml(cdn.confidence || 'none')} confidence${cdn.edge && cdn.edge.popCode ? ` • ${escapeHtml(cdn.edge.popCode)}` : ''}`)}
                     ${statCard('shield', 'SSL', isHttps ? (tls.available ? escapeHtml(tls.version) : 'Secured') : 'Not Secure', isHttps ? 'Encrypted transport' : 'Plain HTTP', isHttps ? 'text-success' : 'text-error')}
                     ${statCard('database', 'Cache', escapeHtml(cacheStatusVal), escapeHtml(cache.documentSource || 'network'), cacheStatusVal.includes('HIT') ? 'text-success' : 'text-warning')}
                     ${statCard('clock', 'TTFB', formatDuration(ttfbMs), 'Time to first byte')}
@@ -569,6 +569,8 @@ document.addEventListener('DOMContentLoaded', () => {
                             ${row('Doc Delivery Source', escapeHtml(cache.documentSource || 'network'), 'text-info', "Shows whether document was retrieved from network, disk cache, service worker, or prefetch.")}
                             ${row('CDN Provider', escapeHtml(providerName), 'text-accent', "Identifies the Content Delivery Network routing traffic to edge servers.")}
                             ${row('Detection Confidence', escapeHtml(cdn.confidence || 'none'), '', "How strong the CDN fingerprint evidence is.")}
+                            ${cdn.edge && cdn.edge.edgePop ? row('Edge / PoP Node', escapeHtml(cdn.edge.edgePop + (cdn.edge.popCode ? ` (${cdn.edge.popCode})` : '')), 'mono', "Point of Presence (PoP) or edge server node identifier.") : ''}
+                            ${data.allProviders && data.allProviders.length > 1 ? row('All Detected CDNs', escapeHtml(data.allProviders.join(', ')), 'text-accent', "All distinct CDN providers observed across assets and subdomains.") : ''}
                             ${cdn.evidence && cdn.evidence.length > 0 ? row('Evidence', escapeHtml(cdn.evidence[0]), 'mono', "Header or fingerprint used to identify the provider.") : ''}
                         </div>
                     `)}

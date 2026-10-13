@@ -21,7 +21,60 @@
  */
 
 // Confidence numeric weights for sorting
-const CONF_WEIGHT = { high: 3, medium: 2, low: 1, none: 0 };
+export const CONF_WEIGHT = { high: 3, medium: 2, low: 1, none: 0 };
+
+const SENSITIVE_HEADER_KEYS = new Set([
+    'authorization',
+    'proxy-authorization',
+    'cookie',
+    'set-cookie',
+    'x-auth-token',
+    'x-api-key'
+]);
+
+/**
+ * Normalizes header keys to lowercase and cleanly handles duplicate,
+ * array-formatted, or malformed header values.
+ */
+export function normalizeHeaders(rawHeaders = {}) {
+    if (!rawHeaders || typeof rawHeaders !== 'object') return {};
+    const normalized = {};
+    for (const [key, value] of Object.entries(rawHeaders)) {
+        if (key === undefined || key === null) continue;
+        const lowerKey = String(key).trim().toLowerCase();
+        if (!lowerKey) continue;
+
+        let valStr = '';
+        if (Array.isArray(value)) {
+            valStr = value.map(v => (v !== undefined && v !== null) ? String(v).trim() : '').filter(Boolean).join(', ');
+        } else if (value !== undefined && value !== null) {
+            valStr = String(value).trim();
+        }
+
+        if (normalized[lowerKey]) {
+            if (valStr && !normalized[lowerKey].includes(valStr)) {
+                normalized[lowerKey] = `${normalized[lowerKey]}, ${valStr}`;
+            }
+        } else {
+            normalized[lowerKey] = valStr;
+        }
+    }
+    return normalized;
+}
+
+/**
+ * Strips sensitive authorization and cookie headers from responses before
+ * exporting or persisting analysis objects.
+ */
+export function scrubSensitiveHeaders(rawHeaders = {}) {
+    const clean = {};
+    for (const [k, v] of Object.entries(rawHeaders)) {
+        if (!SENSITIVE_HEADER_KEYS.has(String(k).trim().toLowerCase())) {
+            clean[k] = v;
+        }
+    }
+    return clean;
+}
 
 /**
  * Evaluates a single CDN provider's signal set against the supplied headers.
@@ -52,7 +105,8 @@ function testProvider(name, highSignals, mediumSignals, headers, server, via, xP
     return { provider: name, confidence, evidence };
 }
 
-export function detectCdnProvider(headers = {}) {
+export function detectCdnProvider(rawHeaders = {}) {
+    const headers = normalizeHeaders(rawHeaders);
     const server = (headers['server'] || '').toLowerCase();
     const via = (headers['via'] || '').toLowerCase();
     const xPoweredBy = (headers['x-powered-by'] || '').toLowerCase();
@@ -444,3 +498,249 @@ export function extractCacheStatus(headers = {}) {
 
     return status;
 }
+
+/**
+ * Extracts edge-server / Point of Presence (PoP) identifiers and network-level
+ * remote IP records from response headers and connection metadata.
+ * Edge identification is kept strictly separate from CDN provider identification.
+ * Does NOT infer city or PoP from an IP address alone.
+ */
+export function extractEdgeEvidence(rawHeaders = {}, providerName = '', remoteIp = null, remotePort = null) {
+    const headers = normalizeHeaders(rawHeaders);
+    let edgePop = null;
+    let popCode = null;
+    let evidenceSource = null;
+    let requestIdentifier = null;
+
+    // 1. Cloudflare: cf-ray (format: <hash>-<POP_IATA_CODE>)
+    if (headers['cf-ray']) {
+        const cfRay = String(headers['cf-ray']).trim();
+        requestIdentifier = cfRay;
+        const lastDash = cfRay.lastIndexOf('-');
+        if (lastDash !== -1 && lastDash < cfRay.length - 1) {
+            const suffix = cfRay.substring(lastDash + 1).trim();
+            if (/^[A-Za-z]{3,4}$/.test(suffix)) {
+                edgePop = suffix.toUpperCase();
+                popCode = edgePop;
+                evidenceSource = 'cf-ray';
+            }
+        }
+        if (!evidenceSource) {
+            evidenceSource = 'cf-ray';
+            edgePop = cfRay;
+        }
+    }
+
+    // 2. Amazon CloudFront: x-amz-cf-pop (e.g. IAD89-C1) and x-amz-cf-id
+    if (headers['x-amz-cf-pop']) {
+        edgePop = String(headers['x-amz-cf-pop']).trim();
+        evidenceSource = 'x-amz-cf-pop';
+        const m = edgePop.match(/^([A-Za-z]{3})/);
+        if (m) {
+            popCode = m[1].toUpperCase();
+        }
+    }
+    if (headers['x-amz-cf-id']) {
+        requestIdentifier = String(headers['x-amz-cf-id']).trim();
+        if (!evidenceSource) evidenceSource = 'x-amz-cf-id';
+    }
+
+    // 3. Fastly: x-served-by (e.g. cache-iad-kiad12345-IAD) and x-fastly-request-id
+    if (headers['x-served-by']) {
+        const rawServed = String(headers['x-served-by']).trim();
+        evidenceSource = 'x-served-by';
+        const hops = rawServed.split(',').map(s => s.trim()).filter(Boolean);
+        const lastHop = hops[hops.length - 1] || rawServed;
+        edgePop = lastHop;
+        const m = lastHop.match(/-([A-Za-z]{3,4})$/);
+        if (m) {
+            popCode = m[1].toUpperCase();
+        }
+    }
+    if (headers['x-fastly-request-id']) {
+        requestIdentifier = String(headers['x-fastly-request-id']).trim();
+        if (!evidenceSource) evidenceSource = 'x-fastly-request-id';
+    }
+
+    // 4. Akamai: akamai-grn, x-akamai-request-id, x-akamai-transformed
+    if (headers['akamai-grn']) {
+        requestIdentifier = String(headers['akamai-grn']).trim();
+        evidenceSource = 'akamai-grn';
+        edgePop = requestIdentifier;
+    } else if (headers['x-akamai-request-id']) {
+        requestIdentifier = String(headers['x-akamai-request-id']).trim();
+        if (!evidenceSource) {
+            evidenceSource = 'x-akamai-request-id';
+            edgePop = requestIdentifier;
+        }
+    }
+
+    // 5. Vercel: x-vercel-id (e.g. iad1::iad1::...)
+    if (headers['x-vercel-id']) {
+        const vercelId = String(headers['x-vercel-id']).trim();
+        requestIdentifier = vercelId;
+        const parts = vercelId.split('::');
+        if (parts[0]) {
+            edgePop = parts[0].trim();
+            evidenceSource = 'x-vercel-id';
+            const m = edgePop.match(/^([A-Za-z]{3})/);
+            if (m) popCode = m[1].toUpperCase();
+        }
+    }
+
+    // 6. CDN77: x-77-pop
+    if (headers['x-77-pop']) {
+        edgePop = String(headers['x-77-pop']).trim();
+        evidenceSource = 'x-77-pop';
+    }
+
+    // 7. KeyCDN: x-edge-location
+    if (headers['x-edge-location']) {
+        edgePop = String(headers['x-edge-location']).trim();
+        evidenceSource = 'x-edge-location';
+    }
+
+    // 8. BunnyCDN: b-ray
+    if (headers['b-ray']) {
+        edgePop = String(headers['b-ray']).trim();
+        evidenceSource = 'b-ray';
+    }
+
+    const isAvailable = Boolean(edgePop);
+
+    return {
+        edgePop: edgePop || null,
+        popCode: popCode || null,
+        remoteIp: remoteIp ? String(remoteIp).trim() : null,
+        remotePort: Number.isInteger(remotePort) ? remotePort : (remotePort ? parseInt(remotePort, 10) : null),
+        evidenceSource: evidenceSource || (remoteIp ? 'socket-remote-ip' : null),
+        requestIdentifier: requestIdentifier || null,
+        availability: isAvailable ? 'available' : 'unavailable',
+        confidence: isAvailable ? 'high' : (remoteIp ? 'low' : 'none'),
+        limitations: isAvailable ? [] : ['Edge/PoP identifier not exposed in response headers']
+    };
+}
+
+/**
+ * Runs provider detection and edge evidence extraction against an individual resource.
+ */
+export function detectResourceCdn(rawHeaders = {}, url = '', resourceType = 'Other', remoteIp = null, remotePort = null) {
+    const headers = normalizeHeaders(rawHeaders);
+    const detection = detectCdnProvider(headers);
+    const edge = extractEdgeEvidence(headers, detection.provider, remoteIp, remotePort);
+
+    let hostname = '';
+    try {
+        hostname = new URL(url).hostname;
+    } catch (e) {
+        hostname = url || '';
+    }
+
+    const isDetected = detection.provider &&
+        detection.provider !== 'Not Detected' &&
+        detection.provider !== 'Unknown';
+
+    return {
+        provider: isDetected ? detection.provider : 'Not Detected',
+        confidence: detection.confidence,
+        matchedEvidence: detection.evidence || [],
+        detectionMethod: isDetected ? 'response-header-inspection' : 'none',
+        hostname,
+        url,
+        resourceType,
+        edge,
+        possibleLayers: detection.possibleLayers || [],
+        limitations: isDetected ? [] : ['No definitive CDN provider signature found in response headers']
+    };
+}
+
+/**
+ * Groups per-resource CDN and edge detections by hostname, supporting multi-CDN
+ * delivery architectures and preserving independent evidence per host.
+ */
+export function aggregateHostCdn(resourcesList = [], mainUrl = '') {
+    let mainHost = '';
+    try {
+        if (mainUrl) mainHost = new URL(mainUrl).hostname;
+    } catch (e) {}
+
+    const byHost = {};
+    const allProvidersSet = new Set();
+
+    for (const res of resourcesList) {
+        if (!res) continue;
+        const host = res.hostname || (res.url ? (() => { try { return new URL(res.url).hostname; } catch(e){ return ''; } })() : '');
+        if (!host) continue;
+
+        if (!byHost[host]) {
+            byHost[host] = {
+                hostname: host,
+                provider: 'Not Detected',
+                confidence: 'none',
+                isCdn: false,
+                isMainHost: host === mainHost,
+                requestCount: 0,
+                encodedBytes: 0,
+                remoteIps: [],
+                edgePops: [],
+                resourceTypes: [],
+                evidence: [],
+                detectedProviders: []
+            };
+        }
+
+        const hostEntry = byHost[host];
+        hostEntry.requestCount++;
+        hostEntry.encodedBytes += (res.encodedDataLength || 0);
+
+        const type = res.resourceType || res.type || 'Other';
+        if (!hostEntry.resourceTypes.includes(type)) {
+            hostEntry.resourceTypes.push(type);
+        }
+
+        const remoteIp = res.remoteIPAddress || res.edge?.remoteIp;
+        if (remoteIp && !hostEntry.remoteIps.includes(remoteIp)) {
+            hostEntry.remoteIps.push(remoteIp);
+        }
+
+        const edgePop = res.edge?.edgePop;
+        if (edgePop && !hostEntry.edgePops.includes(edgePop)) {
+            hostEntry.edgePops.push(edgePop);
+        }
+
+        const provider = res.cdn?.provider;
+        const confidence = res.cdn?.confidence || 'none';
+        if (provider && provider !== 'Not Detected' && provider !== 'Unknown') {
+            allProvidersSet.add(provider);
+            if (!hostEntry.detectedProviders.includes(provider)) {
+                hostEntry.detectedProviders.push(provider);
+            }
+
+            const weightCurrent = CONF_WEIGHT[hostEntry.confidence] || 0;
+            const weightNew = CONF_WEIGHT[confidence] || 0;
+            if (weightNew > weightCurrent || hostEntry.provider === 'Not Detected') {
+                hostEntry.provider = provider;
+                hostEntry.confidence = confidence;
+                hostEntry.isCdn = true;
+            }
+            if (res.cdn?.matchedEvidence) {
+                for (const ev of res.cdn.matchedEvidence) {
+                    if (!hostEntry.evidence.includes(ev)) {
+                        hostEntry.evidence.push(ev);
+                    }
+                }
+            }
+        }
+    }
+
+    const allProviders = Array.from(allProvidersSet);
+    const mainHostProvider = (mainHost && byHost[mainHost]) ? byHost[mainHost].provider : 'Not Detected';
+
+    return {
+        byHost,
+        allProviders,
+        mainHostProvider,
+        crossHostCdnCount: allProviders.length
+    };
+}
+
