@@ -23,14 +23,22 @@ import { analyzeResources } from './resources.js';
 import { calculateMetrics } from './metrics.js';
 import { calculatePerformanceScore, generateSuggestions } from './scoring.js';
 
-export async function executeCdpAnalysis(targetUrl, notifyProgress) {
+export async function executeCdpAnalysis(targetUrl, notifyProgress, cancelToken = null) {
     let tempTabId = null;
     let debuggerAttached = false;
 
     try {
+        if (cancelToken?.isCancelled) {
+            throw new Error("Analysis was cancelled.");
+        }
+
         notifyProgress("Validating URL...");
         if (!targetUrl || !/^https?:\/\//i.test(targetUrl)) {
             throw new Error("Invalid URL scheme. Please enter a valid http:// or https:// website URL.");
+        }
+
+        if (cancelToken?.isCancelled) {
+            throw new Error("Analysis was cancelled.");
         }
 
         notifyProgress("Creating Background Analysis Tab...");
@@ -39,6 +47,13 @@ export async function executeCdpAnalysis(targetUrl, notifyProgress) {
             active: false
         });
         tempTabId = bgTab.id;
+        if (cancelToken) {
+            cancelToken.tabId = tempTabId;
+        }
+
+        if (cancelToken?.isCancelled) {
+            throw new Error("Analysis was cancelled.");
+        }
 
         if (!tempTabId) {
             throw new Error("Failed to create background tab for analysis.");
@@ -48,8 +63,16 @@ export async function executeCdpAnalysis(targetUrl, notifyProgress) {
         await chrome.debugger.attach({ tabId: tempTabId }, "1.3");
         debuggerAttached = true;
 
+        if (cancelToken?.isCancelled) {
+            throw new Error("Analysis was cancelled.");
+        }
+
         notifyProgress("Loading Website...");
-        const rawReport = await captureCdpEvents(tempTabId, targetUrl, notifyProgress);
+        const rawReport = await captureCdpEvents(tempTabId, targetUrl, notifyProgress, cancelToken);
+
+        if (cancelToken?.isCancelled) {
+            throw new Error("Analysis was cancelled.");
+        }
 
         notifyProgress("Generating Report...");
         return {
@@ -58,12 +81,22 @@ export async function executeCdpAnalysis(targetUrl, notifyProgress) {
         };
 
     } catch (err) {
+        if (cancelToken?.isCancelled) {
+            return {
+                success: false,
+                cancelled: true,
+                error: "Analysis was cancelled."
+            };
+        }
         console.error("[CDP Engine v2] Error during analysis:", err);
         return {
             success: false,
             error: err.message || "Background analysis failed."
         };
     } finally {
+        if (cancelToken && cancelToken.tabId === tempTabId) {
+            cancelToken.tabId = null;
+        }
         if (debuggerAttached && tempTabId) {
             await chrome.debugger.detach({ tabId: tempTabId }).catch(() => {});
         }
@@ -95,7 +128,7 @@ function cdpSend(tabId, method, params = {}, timeoutMs = 4000) {
     });
 }
 
-function captureCdpEvents(tabId, targetUrl, notifyProgress) {
+function captureCdpEvents(tabId, targetUrl, notifyProgress, cancelToken = null) {
     return new Promise(async (resolve, reject) => {
         let isResolved = false;
 
@@ -140,6 +173,24 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress) {
             chrome.debugger.onEvent.removeListener(cdpEventListener);
             chrome.debugger.onDetach.removeListener(detachListener);
             chrome.tabs.onRemoved.removeListener(tabRemovedListener);
+            if (cancelToken) {
+                cancelToken.onCancel = null;
+            }
+        }
+
+        if (cancelToken) {
+            cancelToken.onCancel = () => {
+                if (isResolved) return;
+                isResolved = true;
+                if (timeoutTimer) clearTimeout(timeoutTimer);
+                if (idleTimer) clearTimeout(idleTimer);
+                if (postLoadCapTimer) clearTimeout(postLoadCapTimer);
+                if (domContentCapTimer) clearTimeout(domContentCapTimer);
+                cleanupListeners();
+                requests.clear();
+                extraInfoBuffer.clear();
+                reject(new Error("Analysis cancelled"));
+            };
         }
 
         function detachListener(source, reason) {
@@ -170,6 +221,18 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress) {
 
         function finishAnalysis(reason = "complete") {
             if (isResolved) return;
+            if (cancelToken?.isCancelled) {
+                isResolved = true;
+                if (timeoutTimer) clearTimeout(timeoutTimer);
+                if (idleTimer) clearTimeout(idleTimer);
+                if (postLoadCapTimer) clearTimeout(postLoadCapTimer);
+                if (domContentCapTimer) clearTimeout(domContentCapTimer);
+                cleanupListeners();
+                requests.clear();
+                extraInfoBuffer.clear();
+                reject(new Error("Analysis cancelled"));
+                return;
+            }
             isResolved = true;
 
             if (timeoutTimer) clearTimeout(timeoutTimer);
@@ -255,7 +318,7 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress) {
                     mainDocumentResponse.fromPrefetchCache ? 'prefetch' : 'network'
                 ) : 'network';
 
-                resolve({
+                const finalResult = {
                     schemaVersion: 2,
                     requestedUrl,
                     finalUrl,
@@ -281,8 +344,13 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress) {
                     scoreDetails,
                     suggestions,
                     timestamp: new Date().toISOString()
-                });
+                };
+                requests.clear();
+                extraInfoBuffer.clear();
+                resolve(finalResult);
             } catch (err) {
+                requests.clear();
+                extraInfoBuffer.clear();
                 reject(err);
             }
         }
@@ -445,6 +513,13 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress) {
             mainNavigationStart = performance.now();
             await cdpSend(tabId, "Page.navigate", { url: targetUrl });
         } catch (err) {
+            if (cancelToken?.isCancelled) {
+                cleanupListeners();
+                requests.clear();
+                extraInfoBuffer.clear();
+                reject(new Error("Analysis cancelled"));
+                return;
+            }
             console.warn("[CDP Engine v2] Page.navigate returned error:", err.message);
             if (mainDocumentResponse || requests.size > 0) {
                 if (!idleTimer) {
@@ -454,6 +529,8 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress) {
                 }
             } else {
                 cleanupListeners();
+                requests.clear();
+                extraInfoBuffer.clear();
                 reject(err);
             }
         }

@@ -20,6 +20,7 @@ document.addEventListener('DOMContentLoaded', () => {
         'Generating Report…'
     ];
     let stepTimer = null;
+    let currentAnalysisId = null;
 
     restoreAnalysisState();
 
@@ -76,25 +77,30 @@ document.addEventListener('DOMContentLoaded', () => {
 
     /* ---------------- reset ---------------- */
 
+    function resetToHomeState() {
+        stopStepCycle();
+        if (resultsArea) resultsArea.innerHTML = '';
+        urlInput.value = '';
+        analyzeBtn.disabled = true;
+        setAnalyzingState(false);
+        setRefreshingState(false);
+        setHomeMode(true);
+        updateFieldUI();
+    }
+
     if (refreshBtn) {
         refreshBtn.addEventListener('click', () => {
+            currentAnalysisId = null;
             setRefreshingState(true);
+            stopStepCycle();
             if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
                 chrome.runtime.sendMessage({ action: 'CLEAR_ANALYSIS_STATE' }, () => {
-                    urlInput.value = '';
-                    analyzeBtn.disabled = true;
-                    resultsArea.innerHTML = '';
-                    setRefreshingState(false);
-                    setHomeMode(true);
-                    updateFieldUI();
+                    resetToHomeState();
+                    populateActiveTabUrl();
                 });
             } else {
-                urlInput.value = '';
-                analyzeBtn.disabled = true;
-                resultsArea.innerHTML = '';
-                setRefreshingState(false);
-                setHomeMode(true);
-                updateFieldUI();
+                resetToHomeState();
+                populateActiveTabUrl();
             }
         });
     }
@@ -103,12 +109,22 @@ document.addEventListener('DOMContentLoaded', () => {
     if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
         chrome.runtime.onMessage.addListener((message) => {
             if (message.action === 'ANALYSIS_PROGRESS') {
+                if (!currentAnalysisId || (message.analysisId && message.analysisId !== currentAnalysisId)) {
+                    return;
+                }
                 const statusEl = document.getElementById('loadingStatusText');
-                if (statusEl) {
+                if (statusEl && message.step) {
                     statusEl.textContent = message.step;
                 }
             } else if (message.action === 'ANALYSIS_STATE_UPDATED' && message.state) {
+                if (!currentAnalysisId || (message.analysisId && message.analysisId !== currentAnalysisId)) {
+                    return;
+                }
                 renderAnalysisState(message.state);
+            } else if (message.action === 'ANALYSIS_STATE_CLEARED') {
+                currentAnalysisId = null;
+                resetToHomeState();
+                populateActiveTabUrl();
             }
         });
     }
@@ -180,7 +196,7 @@ document.addEventListener('DOMContentLoaded', () => {
         analyzeBtn.disabled = isAnalyzing || analyzeBtn.disabled;
     }
 
-    /* ---------------- analysis (logic unchanged) ---------------- */
+    /* ---------------- analysis ---------------- */
 
     async function analyze() {
         const rawUrl = urlInput.value.trim();
@@ -189,11 +205,38 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        let url = rawUrl;
-        if (!/^https?:\/\//i.test(url)) {
-            url = 'https://' + url;
+        // Step 4.1: Validate target URL using standard URL parser
+        let validUrl;
+        try {
+            let candidate = rawUrl;
+            if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(candidate)) {
+                if (!/^https?:\/\//i.test(candidate)) {
+                    throw new Error("Only HTTP and HTTPS URLs are supported.");
+                }
+            } else {
+                candidate = 'https://' + candidate;
+            }
+            const parsed = new URL(candidate);
+            if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+                throw new Error("Only HTTP and HTTPS URLs are supported.");
+            }
+            if (!parsed.hostname || (!parsed.hostname.includes('.') && parsed.hostname !== 'localhost')) {
+                throw new Error("Please enter a valid website domain.");
+            }
+            validUrl = parsed.href;
+        } catch (err) {
+            showError(err.message || "Please enter a valid website URL (e.g. example.com or https://example.com).");
+            analyzeBtn.disabled = false;
+            setAnalyzingState(false);
+            setRefreshingState(false);
+            return;
         }
 
+        // Step 4.2 & 4.3: Create a unique analysis ID and clear previous displayed analysis
+        const runId = 'analysis_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+        currentAnalysisId = runId;
+
+        if (resultsArea) resultsArea.innerHTML = '';
         showLoadingUI('Validating URL…');
         analyzeBtn.disabled = true;
         setAnalyzingState(true);
@@ -202,14 +245,24 @@ document.addEventListener('DOMContentLoaded', () => {
         if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
             chrome.runtime.sendMessage({
                 action: 'START_ANALYSIS',
-                url: url
+                url: validUrl,
+                analysisId: runId
             }, (response) => {
+                if (runId !== currentAnalysisId) {
+                    // Stale response from a superseded run or reset — discard completely!
+                    return;
+                }
+
                 analyzeBtn.disabled = false;
                 setAnalyzingState(false);
                 setRefreshingState(false);
                 if (chrome.runtime.lastError) {
                     console.error("[UI v2] Runtime error:", chrome.runtime.lastError);
                     showError(chrome.runtime.lastError.message || "Failed to communicate with background service worker.");
+                    return;
+                }
+
+                if (response && response.cancelled) {
                     return;
                 }
 
@@ -246,7 +299,10 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function restoreAnalysisState() {
+        setHomeMode(true);
+        if (resultsArea) resultsArea.innerHTML = '';
         updateFieldUI();
+
         if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.sendMessage) {
             populateActiveTabUrl();
             return;
@@ -254,15 +310,28 @@ document.addEventListener('DOMContentLoaded', () => {
 
         chrome.runtime.sendMessage({ action: 'GET_ANALYSIS_STATE' }, (response) => {
             if (chrome.runtime.lastError || !response || !response.state) {
+                currentAnalysisId = null;
                 populateActiveTabUrl();
                 return;
             }
-            renderAnalysisState(response.state);
+
+            const state = response.state;
+            if (state && state.status === 'running') {
+                currentAnalysisId = state.analysisId || null;
+                renderAnalysisState(state);
+            } else {
+                // Completed or error state from previous run is never restored; start completely fresh
+                currentAnalysisId = null;
+                populateActiveTabUrl();
+            }
         });
     }
 
     function renderAnalysisState(state) {
         if (!state) return;
+        if (state.analysisId && currentAnalysisId && state.analysisId !== currentAnalysisId) {
+            return;
+        }
         if (state.url) {
             urlInput.value = state.url;
             updateFieldUI();
