@@ -15,14 +15,31 @@
                 <img class="topbar-logo" src="icons/icon-v7.png" alt="CDN Analyzer Pro logo">
                 <span class="topbar-name">CDN Analyzer</span>
             </div>
-            <button id="refreshBtn" class="ghost-btn" title="Reset and clear analysis" aria-label="Reset and clear analysis" type="button">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <path d="M23 4v6h-6"></path>
-                    <path d="M1 20v-6h6"></path>
-                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
-                </svg>
-                <span>Reset</span>
-            </button>
+            <div class="topbar-actions">
+                <button id="copyReportBtn" class="ghost-btn" title="Copy Markdown Analysis Report" aria-label="Copy Markdown Analysis Report" type="button">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                    </svg>
+                    <span>Copy</span>
+                </button>
+                <button id="exportJsonBtn" class="ghost-btn" title="Export Sanitized JSON" aria-label="Export Sanitized JSON" type="button">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                        <polyline points="7 10 12 15 17 10"></polyline>
+                        <line x1="12" y1="15" x2="12" y2="3"></line>
+                    </svg>
+                    <span>JSON</span>
+                </button>
+                <button id="refreshBtn" class="ghost-btn" title="Reset and clear analysis" aria-label="Reset and clear analysis" type="button">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M23 4v6h-6"></path>
+                        <path d="M1 20v-6h6"></path>
+                        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+                    </svg>
+                    <span>Reset</span>
+                </button>
+            </div>
         </header>
 
         <main class="main">
@@ -89,6 +106,6 @@
         </div>
     </template>
 
-    <script src="popup.js"></script>
+    <script type="module" src="popup.js"></script>
 </body>
 </html>

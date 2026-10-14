@@ -18,7 +18,8 @@ const suites = [
     { name: "5. Analysis Lifecycle & Isolation", file: "test_lifecycle.mjs" },
     { name: "6. End-to-End Pipeline Integration", file: "test_integration.mjs" },
     { name: "7. Metrics & Accounting Verification", file: "test_goal3_metrics.mjs" },
-    { name: "8. Reliability & Error Handling", file: "test_reliability.mjs" }
+    { name: "8. Reliability & Error Handling", file: "test_reliability.mjs" },
+    { name: "9. Report Generation & Result Clarity", file: "test_report_ui.mjs" }
 ];
 
 console.log("==================================================================");
@@ -61,7 +62,7 @@ for (const s of summary) {
 console.log("==================================================================");
 
 if (allPassed) {
-    console.log("ALL 8 TEST SUITES (94 DETERMINISTIC TESTS) PASSED SUCCESSFULLY!");
+    console.log(`ALL ${suites.length} TEST SUITES (135 DETERMINISTIC TESTS) PASSED SUCCESSFULLY!`);
     process.exit(0);
 } else {
     console.error("SOME TEST SUITES ENCOUNTERED FAILURES!");
