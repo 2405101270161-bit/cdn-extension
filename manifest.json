@@ -5,7 +5,6 @@
   "description": "Analyzes CDN usage, network timing, security headers, and asset payloads using Chrome DevTools Protocol.",
   "permissions": [
     "activeTab",
-    "scripting",
     "storage",
     "tabs",
     "debugger"
@@ -18,18 +17,6 @@
     "service_worker": "background.js",
     "type": "module"
   },
-  "content_scripts": [
-    {
-      "matches": [
-        "http://*/*",
-        "https://*/*"
-      ],
-      "js": [
-        "content.js"
-      ],
-      "run_at": "document_idle"
-    }
-  ],
   "action": {
     "default_popup": "popup.html",
     "default_title": "CDN Analyzer Pro",

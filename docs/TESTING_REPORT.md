@@ -1,9 +1,9 @@
-# CDN Analyzer Pro — Automated Regression Testing & Reliability Verification Report
+# CDN Analyzer Pro — Automated Regression Testing & Verification Report
 
-**Project:** CDN Analyzer Pro (Chrome Extension Manifest V3)  
-**Goals:** Goal 4 (Automated Regression Testing & Chrome Verification) & Goal 5 (Reliability & Error Handling)  
-**Date:** October 14, 2026  
-**Status:** Completed & Fully Verified  
+**Project:** CDN Analyzer Pro (Chrome Extension Manifest V3)
+**Goals:** Goal 4 (Automated Regression Testing), Goal 5 (Reliability & Error Handling), Goal 6 (Report & UI Improvements)
+**Date:** October 14, 2026
+**Status:** Completed & Fully Verified
 
 ---
 
@@ -13,13 +13,13 @@
 - **Node.js Runtime:** v25.9.0 (native ESM, `node:assert`, `node:child_process`, `node:https`, `node:url`)
 - **Browser Target:** Google Chrome `120+` (`C:\Program Files\Google\Chrome\Application\chrome.exe`)
 - **Architecture:** Zero external npm testing dependencies; lightweight deterministic test suites utilizing Node.js built-ins.
-- **Unified Test Runner:** [tests/run_all_tests.mjs](file:///c:/Users/ayush/OneDrive/Desktop/cdn%20extension%20fixed/tests/run_all_tests.mjs) executing 8 isolated ESM test suites with exit-code gating.
+- **Unified Test Runner:** [tests/run_all_tests.mjs](file:///c:/Users/ayush/OneDrive/Desktop/cdn%20extension%20fixed/tests/run_all_tests.mjs) executing 9 isolated ESM test suites with exit-code gating.
 
 ---
 
 ## 2. Test Suites & Tests Executed
 
-A total of **94 deterministic automated tests** were executed across 8 dedicated test suites, alongside a live network smoke-test script:
+A total of **135 deterministic automated tests** were executed across 9 dedicated test suites, alongside a live network smoke-test script:
 
 | Test Suite File | Scope | Tests Run | Result |
 | :--- | :--- | :---: | :---: |
@@ -30,8 +30,9 @@ A total of **94 deterministic automated tests** were executed across 8 dedicated
 | [tests/test_lifecycle.mjs](file:///c:/Users/ayush/OneDrive/Desktop/cdn%20extension%20fixed/tests/test_lifecycle.mjs) | Fresh state on start, generation counter isolation, cancel token abort, debugger cleanup | 7 | **7 PASSED** |
 | [tests/test_integration.mjs](file:///c:/Users/ayush/OneDrive/Desktop/cdn%20extension%20fixed/tests/test_integration.mjs) | End-to-end pipeline with synthetic CDP events (origin HTML, CDN assets, multi-host) | 8 | **8 PASSED** |
 | [tests/test_goal3_metrics.mjs](file:///c:/Users/ayush/OneDrive/Desktop/cdn%20extension%20fixed/tests/test_goal3_metrics.mjs) | Regression verification for Goal 3 metrics, transfer accounting, and public suffixes | 14 | **14 PASSED** |
-| [tests/test_reliability.mjs](file:///c:/Users/ayush/OneDrive/Desktop/cdn%20extension%20fixed/tests/test_reliability.mjs) | **New (Goal 5)**: Debugger attach failure, premature tab closure, timeout, cancel, concurrent requests, detach, late CDP events, idempotent cleanup, error recovery, worker restart, non-owned tab safety, timer cleanup, secret scrubbing | 14 | **14 PASSED** |
-| **Total Automated Tests** | | **94** | **94 PASSED** |
+| [tests/test_reliability.mjs](file:///c:/Users/ayush/OneDrive/Desktop/cdn%20extension%20fixed/tests/test_reliability.mjs) | Debugger attach failure, premature tab closure, timeout, cancel, concurrent requests, detach, late CDP events, idempotent cleanup, error recovery, worker restart, non-owned tab safety, timer cleanup, secret scrubbing | 14 | **14 PASSED** |
+| [tests/test_report_ui.mjs](file:///c:/Users/ayush/OneDrive/Desktop/cdn%20extension%20fixed/tests/test_report_ui.mjs) | **New (Goal 6)**: Structured 8-section report generation, unmeasured sentinels vs 0ms, connection reuse labeling, browser vs CDN cache separation, sensitive header exclusion, host distribution, empty states, and limitation tracking | 41 | **41 PASSED** |
+| **Total Automated Tests** | | **135** | **135 PASSED** |
 
 ---
 
@@ -138,7 +139,88 @@ To manually load and verify the extension in Google Chrome:
 
 ---
 
-## 6. Remaining Limitations & Chrome CDP Behavior
+## 6. Goal 6: Report and UI Improvements Verification
+
+### 6.1 Defects Identified in Pre-Implementation Audit
+1. **Absence of Report Export/Copy Mechanism:** The extension collected detailed diagnostic data across 8 distinct categories, but provided no export or clipboard copying capability for security auditors or developers.
+2. **WCAG AA Color Contrast Deficiency:** The `--text-dim` design token (`#7d7d7d`) on dark backgrounds (`#0D0D0D`, `#171717`) had a contrast ratio of ~3.5:1, failing WCAG AA (minimum 4.5:1 required for standard text).
+3. **Conflation of Edge Server Node IDs with Geographic PoPs:** Physical server node IDs (e.g., `BOM78-P3`) were rendered alongside airport codes without clearly distinguishing verified geographic IATA locations from internal server identifiers.
+4. **Incomplete Resource-Level Delivery Reporting:** The Resources accordion only displayed 5 asset highlight cards, omitting a macro summary of how many total requests were served via CDN vs direct origin, and omitting per-host request distribution.
+5. **Score Component Breakdown Obscured:** Users were shown an overall 0–100 score and letter grade without seeing how individual sub-scores (Page Load, TTFB, Edge Cache, Compression, Security) contributed to the final rating.
+6. **Incomplete TLS State Presentation:** When CDP did not report low-level SSL cipher/version metadata on HTTPS connections, the UI displayed "Not Available", which could be misinterpreted as an unencrypted plain HTTP transport.
+
+### 6.2 UI & Reporting Improvements Implemented
+1. **Structured 8-Section Audit Report Generation ([modules/report.js](file:///c:/Users/ayush/OneDrive/Desktop/cdn%20extension%20fixed/modules/report.js)):**
+   - Implemented `generateMarkdownReport(data)` covering all 8 required sections:
+     1. Overall Summary (URL, host, status, protocol, timestamp, score, schema).
+     2. CDN Detection and Supporting Evidence (primary provider, confidence, all providers, edge node, IATA PoP, remote IP, fingerprints).
+     3. Resource-Level Findings (requests captured, CDN ratio, failed/canceled, 1st vs 3rd party, bytes, host breakdown, asset highlights).
+     4. Network Timing and Performance Metrics (document, TTFB, download, DNS, TCP, TLS, DOM loaded, page load, idle, connection reuse).
+     5. Browser-Cache and CDN-Cache Findings (browser delivery source, CDN edge cache status, cache-control policy, proxy age, cached count, SW count).
+     6. Compression and Security Findings (compression algorithm, transport security, TLS specification, HSTS, CSP, X-Frame, nosniff, Referrer).
+     7. Score Calculation & Component Breakdown (final score, grade, page load, TTFB, cache, compression, security, recommendations).
+     8. Missing Measurements, Limitations, and Errors (explicitly catalogs unmeasured phases, iframe omissions, and failed requests).
+2. **Sanitized JSON Export with Sensitive Header Exclusion:**
+   - Implemented `generateSanitizedJsonReport(data)` which automatically strips credentials, JWTs, `authorization`, `cookie`, `set-cookie`, `x-api-key`, and sensitive query parameters from both document and resource records.
+3. **Interactive Export & Copy Controls:**
+   - Added accessible `Copy Report` and `Export JSON` action buttons in the topbar and in a dedicated Report Card at the base of the analysis results.
+   - Built transient visual feedback (`Copied!` state with checkmark) for clipboard operations.
+4. **Visual & Accessibility Refinements ([styles.css](file:///c:/Users/ayush/OneDrive/Desktop/cdn%20extension%20fixed/styles.css)):**
+   - Bumped `--text-dim` from `#7d7d7d` to `#9c9c9c` (contrast ratio > 5.5:1, fully WCAG AA compliant).
+   - Added defensive text wrapping (`overflow-wrap: anywhere; word-break: break-all;`) to prevent long URLs or hash strings from breaking layout boundaries.
+   - Preserved dark neon gradient aesthetic, animations, and established visual identity.
+5. **Clarity in Cache & Connection Evidence:**
+   - Explicitly separated **Doc Delivery Source** (network fetch, disk cache, memory cache, service worker) from **CDN Edge Cache Status** (HIT, MISS, BYPASS, No Edge Cache Headers).
+   - Distinguished physical **Edge Server Node** (e.g. `BOM78-P3`) from **Geographic PoP (IATA)** (e.g. `BOM`).
+   - Labeled connection reuse as `Connection Reused (Bypassed)` rather than displaying misleading 0 ms values.
+
+---
+
+## 7. Goal 7: Final Validation & Release Preparation
+
+### 7.1 Regression Suite Execution & Exact Counts
+- **Execution Command:** `node tests/run_all_tests.mjs`
+- **Total Test Suites Executed:** 9
+- **Total Deterministic Tests:** 135
+- **Pass Count:** 135
+- **Fail Count:** 0
+- **Exit Code:** 0
+- **Live Smoke Test Command:** `node tests/live_smoke_test.mjs` (5 of 5 targets verified live: Google, Flipkart, Cloudflare, Amazon, GitHub).
+
+### 7.2 Security, Privacy, and Manifest V3 Audit
+1. **Permission Reduction (Principle of Least Privilege):**
+   - **`scripting` Permission Removed:** Confirmed unused across all background and popup modules (`chrome.scripting.executeScript` is never called).
+   - **`content_scripts` Declaration Removed:** Removed the declaration that injected `content.js` across `http://*/*` and `https://*/*`. The extension operates entirely via headless CDP background tabs, eliminating code injection into user browsing pages.
+   - **Preserved Justified Permissions:**
+     - `debugger`: Required for CDP attachment and raw wire inspection.
+     - `tabs`: Required to create, navigate, and remove the isolated background analysis tab.
+     - `storage`: Required for `chrome.storage.session` state persistence.
+     - `activeTab`: Required to inspect the current tab URL for prefilling search input.
+     - `host_permissions` (`http://*/*`, `https://*/*`): Required by Chrome for `chrome.debugger.attach` to target tabs.
+2. **Untrusted Data & Safe DOM Rendering:**
+   - All dynamic strings (`host`, `finalUrl`, `providerName`, `protocol`, `error`, `headers`, `subcard-meta`, `recs`) pass through `escapeHtml()` prior to DOM insertion.
+   - Favicon `<img>` tag now includes an explicit `onerror="this.style.display='none'"` fallback handler to prevent broken image icons when offline or in restricted networks.
+3. **Telemetry & Privacy:**
+   - 100% local in-memory and session storage execution. Zero external analytics or tracking beacons.
+   - Automated redaction of sensitive credentials, JWTs, cookies, and tokens in exported reports.
+
+### 7.3 Release Packaging Validation
+- **Packaging Script:** [scripts/package_release.mjs](file:///c:/Users/ayush/OneDrive/Desktop/cdn%20extension%20fixed/scripts/package_release.mjs)
+- **Output Artifacts:**
+  - Unpacked Directory: `dist/cdn-analyzer-pro/` (verified runtime files only)
+  - Distributable ZIP: `dist/cdn-analyzer-pro-v2.0.0.zip` (345.1 KB)
+- **Verification Performed:**
+  - Verified presence of `manifest.json`, `background.js`, `popup.html`, `popup.js`, `styles.css`, `README.md`, `icons/icon-v7.png`, and all 7 modules under `modules/`.
+  - Audited against forbidden patterns: zero `.git/`, `node_modules/`, `tests/`, `docs/`, `.env`, or deprecated `content.js` files included.
+  - Verified all declared icon sizes and background service worker match manifest declarations.
+
+### 7.4 Release Status
+**STATUS: READY FOR RELEASE**
+The extension satisfies all functional, architectural, reliability, security, and packaging requirements for Manifest V3.
+
+---
+
+## 8. Remaining Limitations & Chrome CDP Behavior
 
 1. **Service Worker Lifetime in Manifest V3:** Chrome terminates background service workers after 30 seconds of inactivity. In-flight analyses maintain an active tab lock and promise, but if terminated by Chrome, `getStoredAnalysisState` safely recovers by marking the interrupted run failed rather than hanging indefinitely.
 2. **Third-Party Iframe Timing Restrictions:** Under the W3C Resource Timing specification, cross-origin iframes without the `Timing-Allow-Origin` header do not expose granular TCP/TLS breakdown timings to the document. The extension handles this by keeping `dnsMs` and `tcpMs` as `null` (`Not Available`) rather than reporting misleading zeroes.
@@ -146,14 +228,14 @@ To manually load and verify the extension in Google Chrome:
 
 ---
 
-## 7. Summary of Files Modified & Added
+## 9. Summary of Files Modified & Added
 
 | File | Status | Description |
 | :--- | :---: | :--- |
-| [modules/cdp.js](file:///c:/Users/ayush/OneDrive/Desktop/cdn%20extension%20fixed/modules/cdp.js) | Modified | Added `sanitizeErrorMessage`, `abortAnalysis` routine, idempotent cleanup helper, and late CDP event guards. |
-| [background.js](file:///c:/Users/ayush/OneDrive/Desktop/cdn%20extension%20fixed/background.js) | Modified | Added `thisRunGeneration` decoupling, explicit status tracking (`idle`, `running`, `completed`, `failed`, `cancelled`), and service-worker storage recovery. |
-| [modules/cdn.js](file:///c:/Users/ayush/OneDrive/Desktop/cdn%20extension%20fixed/modules/cdn.js) | Modified | Disallowed empty/whitespace header strings from matching high-confidence CDN signals. |
-| [modules/scoring.js](file:///c:/Users/ayush/OneDrive/Desktop/cdn%20extension%20fixed/modules/scoring.js) | Modified | Refactored compression scoring to avoid penalizing unobserved compression headers. |
-| [tests/test_reliability.mjs](file:///c:/Users/ayush/OneDrive/Desktop/cdn%20extension%20fixed/tests/test_reliability.mjs) | **New (Goal 5)** | 12 deterministic tests for debugger attachment, tab closure, timeouts, cancellation, recovery, and sanitization. |
-| [tests/run_all_tests.mjs](file:///c:/Users/ayush/OneDrive/Desktop/cdn%20extension%20fixed/tests/run_all_tests.mjs) | Modified | Updated runner to execute all 8 suites (92 tests) sequentially with exit-code gating. |
-| [docs/TESTING_REPORT.md](file:///c:/Users/ayush/OneDrive/Desktop/cdn%20extension%20fixed/docs/TESTING_REPORT.md) | Modified | Updated testing and verification report with Goal 5 findings, defects, and results. |
+| [manifest.json](file:///c:/Users/ayush/OneDrive/Desktop/cdn%20extension%20fixed/manifest.json) | Modified | Removed unused `scripting` permission and unused `content_scripts` declaration for least privilege compliance. |
+| [README.md](file:///c:/Users/ayush/OneDrive/Desktop/cdn%20extension%20fixed/README.md) | Modified | Rewritten with comprehensive project overview, feature breakdown, installation guide, usage instructions, permission rationales, test commands, and privacy behavior. |
+| [popup.js](file:///c:/Users/ayush/OneDrive/Desktop/cdn%20extension%20fixed/popup.js) | Modified | Added `onerror` graceful image fallback for site favicon. |
+| [scripts/package_release.mjs](file:///c:/Users/ayush/OneDrive/Desktop/cdn%20extension%20fixed/scripts/package_release.mjs) | **New (Goal 7)** | Automated release packaging script generating `dist/cdn-analyzer-pro/` and `cdn-analyzer-pro-v2.0.0.zip` with file-tree auditing. |
+| [modules/report.js](file:///c:/Users/ayush/OneDrive/Desktop/cdn%20extension%20fixed/modules/report.js) | Added (Goal 6) | Formats comprehensive analysis data into structured 8-section Markdown and sanitized JSON reports without sensitive header leakage. |
+| [tests/test_report_ui.mjs](file:///c:/Users/ayush/OneDrive/Desktop/cdn%20extension%20fixed/tests/test_report_ui.mjs) | Added (Goal 6) | 41 deterministic automated tests covering 8 sections, zero-timing rules, cache separation, secret scrubbing, and partial data. |
+| [docs/TESTING_REPORT.md](file:///c:/Users/ayush/OneDrive/Desktop/cdn%20extension%20fixed/docs/TESTING_REPORT.md) | Modified | Added Goal 7 release-readiness section, package validation, and updated file summary. |
