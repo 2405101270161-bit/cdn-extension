@@ -17,7 +17,8 @@ const suites = [
     { name: "4. Cache Analysis & States", file: "test_cache_analysis.mjs" },
     { name: "5. Analysis Lifecycle & Isolation", file: "test_lifecycle.mjs" },
     { name: "6. End-to-End Pipeline Integration", file: "test_integration.mjs" },
-    { name: "7. Metrics & Accounting Verification", file: "test_goal3_metrics.mjs" }
+    { name: "7. Metrics & Accounting Verification", file: "test_goal3_metrics.mjs" },
+    { name: "8. Reliability & Error Handling", file: "test_reliability.mjs" }
 ];
 
 console.log("==================================================================");
@@ -60,7 +61,7 @@ for (const s of summary) {
 console.log("==================================================================");
 
 if (allPassed) {
-    console.log("ALL 7 TEST SUITES (80 DETERMINISTIC TESTS) PASSED SUCCESSFULLY!");
+    console.log("ALL 8 TEST SUITES (92 DETERMINISTIC TESTS) PASSED SUCCESSFULLY!");
     process.exit(0);
 } else {
     console.error("SOME TEST SUITES ENCOUNTERED FAILURES!");
