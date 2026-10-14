@@ -17,39 +17,129 @@
  *          epoch baseline.
  */
 
-import { detectCdnProvider, extractCacheStatus } from './cdn.js';
+import {
+    detectCdnProvider,
+    extractCacheStatus,
+    analyzeCacheDetails,
+    detectResourceCdn,
+    extractEdgeEvidence,
+    aggregateHostCdn,
+    scrubSensitiveHeaders
+} from './cdn.js';
 import { analyzeSecurity } from './security.js';
 import { analyzeResources } from './resources.js';
 import { calculateMetrics } from './metrics.js';
 import { calculatePerformanceScore, generateSuggestions } from './scoring.js';
 
-export async function executeCdpAnalysis(targetUrl, notifyProgress) {
+/**
+ * Sanitizes error messages by scrubbing sensitive credentials, query parameters,
+ * and normalizing common network failure strings into user-friendly messages.
+ */
+export function sanitizeErrorMessage(rawError) {
+    if (!rawError) return "Unknown analysis error.";
+    let msg = typeof rawError === 'string' ? rawError : (rawError.message || String(rawError));
+
+    // Strip Basic Auth credentials: https://username:password@example.com -> https://example.com
+    msg = msg.replace(/(https?:\/\/)([^:\s/@]+):([^@\s/]+)@/gi, '$1');
+
+    // Redact sensitive query parameters in URLs (token, key, auth, secret, password, session, etc.)
+    msg = msg.replace(/([?&](?:token|key|api_key|apikey|secret|password|auth|access_token|session)=)[^&\s]+/gi, '$1[REDACTED]');
+
+    // Normalize common network failure strings into actionable messages
+    if (msg.includes('net::ERR_NAME_NOT_RESOLVED')) {
+        return "Domain name could not be resolved. Please verify the URL.";
+    }
+    if (msg.includes('net::ERR_CONNECTION_REFUSED')) {
+        return "Connection refused by host server. Please verify the URL and port.";
+    }
+    if (msg.includes('net::ERR_CONNECTION_TIMED_OUT') || msg.includes('Navigation timed out')) {
+        return "Navigation timed out while waiting for server response.";
+    }
+    if (msg.includes('Cannot attach to this target') || msg.includes('Another debugger is already attached')) {
+        return "Could not attach debugger to analysis tab. Another debugger may be active.";
+    }
+
+    return msg;
+}
+
+export async function executeCdpAnalysis(targetUrl, notifyProgress, cancelToken = null) {
     let tempTabId = null;
     let debuggerAttached = false;
+    let isCleanedUp = false;
+
+    async function cleanup() {
+        if (isCleanedUp) return;
+        isCleanedUp = true;
+        if (cancelToken && cancelToken.tabId === tempTabId) {
+            cancelToken.tabId = null;
+        }
+        if (debuggerAttached && tempTabId) {
+            debuggerAttached = false;
+            await chrome.debugger.detach({ tabId: tempTabId }).catch(() => {});
+        }
+        if (tempTabId) {
+            const tid = tempTabId;
+            tempTabId = null;
+            await chrome.tabs.remove(tid).catch(() => {});
+        }
+    }
 
     try {
+        if (cancelToken?.isCancelled) {
+            throw new Error("Analysis was cancelled.");
+        }
+
         notifyProgress("Validating URL...");
         if (!targetUrl || !/^https?:\/\//i.test(targetUrl)) {
             throw new Error("Invalid URL scheme. Please enter a valid http:// or https:// website URL.");
         }
 
+        if (cancelToken?.isCancelled) {
+            throw new Error("Analysis was cancelled.");
+        }
+
         notifyProgress("Creating Background Analysis Tab...");
-        const bgTab = await chrome.tabs.create({
-            url: 'about:blank',
-            active: false
-        });
-        tempTabId = bgTab.id;
+        let bgTab;
+        try {
+            bgTab = await chrome.tabs.create({
+                url: 'about:blank',
+                active: false
+            });
+        } catch (tabErr) {
+            throw new Error("Failed to create background tab: " + tabErr.message);
+        }
+
+        tempTabId = bgTab?.id;
+        if (cancelToken) {
+            cancelToken.tabId = tempTabId;
+        }
+
+        if (cancelToken?.isCancelled) {
+            throw new Error("Analysis was cancelled.");
+        }
 
         if (!tempTabId) {
             throw new Error("Failed to create background tab for analysis.");
         }
 
         notifyProgress("Connecting Chrome Debugger...");
-        await chrome.debugger.attach({ tabId: tempTabId }, "1.3");
-        debuggerAttached = true;
+        try {
+            await chrome.debugger.attach({ tabId: tempTabId }, "1.3");
+            debuggerAttached = true;
+        } catch (attachErr) {
+            throw new Error("Failed to attach Chrome debugger: " + attachErr.message);
+        }
+
+        if (cancelToken?.isCancelled) {
+            throw new Error("Analysis was cancelled.");
+        }
 
         notifyProgress("Loading Website...");
-        const rawReport = await captureCdpEvents(tempTabId, targetUrl, notifyProgress);
+        const rawReport = await captureCdpEvents(tempTabId, targetUrl, notifyProgress, cancelToken);
+
+        if (cancelToken?.isCancelled) {
+            throw new Error("Analysis was cancelled.");
+        }
 
         notifyProgress("Generating Report...");
         return {
@@ -58,18 +148,20 @@ export async function executeCdpAnalysis(targetUrl, notifyProgress) {
         };
 
     } catch (err) {
+        if (cancelToken?.isCancelled) {
+            return {
+                success: false,
+                cancelled: true,
+                error: "Analysis was cancelled."
+            };
+        }
         console.error("[CDP Engine v2] Error during analysis:", err);
         return {
             success: false,
-            error: err.message || "Background analysis failed."
+            error: sanitizeErrorMessage(err.message || "Background analysis failed.")
         };
     } finally {
-        if (debuggerAttached && tempTabId) {
-            await chrome.debugger.detach({ tabId: tempTabId }).catch(() => {});
-        }
-        if (tempTabId) {
-            await chrome.tabs.remove(tempTabId).catch(() => {});
-        }
+        await cleanup();
     }
 }
 
@@ -83,19 +175,27 @@ function cdpSend(tabId, method, params = {}, timeoutMs = 4000) {
             }
         }, timeoutMs);
 
-        chrome.debugger.sendCommand({ tabId }, method, params, (result) => {
-            if (isDone) return;
-            isDone = true;
-            clearTimeout(timer);
-            if (chrome.runtime.lastError) {
-                return reject(new Error(chrome.runtime.lastError.message));
+        try {
+            chrome.debugger.sendCommand({ tabId }, method, params, (result) => {
+                if (isDone) return;
+                isDone = true;
+                clearTimeout(timer);
+                if (chrome.runtime && chrome.runtime.lastError) {
+                    return reject(new Error(chrome.runtime.lastError.message));
+                }
+                resolve(result);
+            });
+        } catch (err) {
+            if (!isDone) {
+                isDone = true;
+                clearTimeout(timer);
+                reject(err);
             }
-            resolve(result);
-        });
+        }
     });
 }
 
-function captureCdpEvents(tabId, targetUrl, notifyProgress) {
+function captureCdpEvents(tabId, targetUrl, notifyProgress, cancelToken = null) {
     return new Promise(async (resolve, reject) => {
         let isResolved = false;
 
@@ -116,13 +216,20 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress) {
         let finalUrl = targetUrl;
         let navigationStartCDP = null;
 
-        const timeoutTimer = setTimeout(() => {
-            finishAnalysis("Navigation timed out (8s ceiling reached)");
-        }, 8000);
-
         let idleTimer = null;
         let postLoadCapTimer = null;
         let domContentCapTimer = null;
+
+        function clearAllTimers() {
+            if (timeoutTimer) clearTimeout(timeoutTimer);
+            if (idleTimer) clearTimeout(idleTimer);
+            if (postLoadCapTimer) clearTimeout(postLoadCapTimer);
+            if (domContentCapTimer) clearTimeout(domContentCapTimer);
+        }
+
+        const timeoutTimer = setTimeout(() => {
+            finishAnalysis("Navigation timed out (8s ceiling reached)");
+        }, 8000);
 
         function scheduleCompletionAfterLoad() {
             if (!postLoadCapTimer) {
@@ -140,17 +247,34 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress) {
             chrome.debugger.onEvent.removeListener(cdpEventListener);
             chrome.debugger.onDetach.removeListener(detachListener);
             chrome.tabs.onRemoved.removeListener(tabRemovedListener);
+            if (cancelToken) {
+                cancelToken.onCancel = null;
+            }
+        }
+
+        function abortAnalysis(err) {
+            if (isResolved) return;
+            isResolved = true;
+            clearAllTimers();
+            cleanupListeners();
+            requests.clear();
+            extraInfoBuffer.clear();
+            reject(err instanceof Error ? err : new Error(String(err)));
+        }
+
+        if (cancelToken) {
+            cancelToken.onCancel = () => {
+                abortAnalysis(new Error("Analysis cancelled"));
+            };
         }
 
         function detachListener(source, reason) {
             if (source.tabId === tabId) {
                 console.warn(`[CDP Engine v2] Debugger detached for tab ${tabId}: ${reason}`);
-                cleanupListeners();
                 if (mainDocumentResponse) {
                     finishAnalysis("Debugger detached after main document response");
-                } else if (!isResolved) {
-                    isResolved = true;
-                    reject(new Error(`Debugger detached unexpectedly: ${reason || 'Target closed or navigated'}`));
+                } else {
+                    abortAnalysis(new Error(`Debugger detached unexpectedly: ${reason || 'Target closed or navigated'}`));
                 }
             }
         }
@@ -158,24 +282,24 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress) {
         function tabRemovedListener(removedTabId) {
             if (removedTabId === tabId) {
                 console.warn(`[CDP Engine v2] Background tab ${tabId} closed prematurely.`);
-                cleanupListeners();
                 if (mainDocumentResponse) {
                     finishAnalysis("Analysis tab closed after main document response");
-                } else if (!isResolved) {
-                    isResolved = true;
-                    reject(new Error("Background analysis tab was closed before completion."));
+                } else {
+                    abortAnalysis(new Error("Background analysis tab was closed before completion."));
                 }
             }
         }
 
         function finishAnalysis(reason = "complete") {
             if (isResolved) return;
+            if (cancelToken?.isCancelled) {
+                abortAnalysis(new Error("Analysis cancelled"));
+                return;
+            }
             isResolved = true;
 
-            if (timeoutTimer) clearTimeout(timeoutTimer);
-            if (idleTimer) clearTimeout(idleTimer);
-            if (postLoadCapTimer) clearTimeout(postLoadCapTimer);
-            if (domContentCapTimer) clearTimeout(domContentCapTimer);
+            clearAllTimers();
+            cleanupListeners();
 
             cleanupListeners();
 
@@ -222,7 +346,67 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress) {
                 }
 
                 const cdnResult = detectCdnProvider(rawHeaders);
-                const cacheProviderStatus = extractCacheStatus(rawHeaders);
+                const mainCacheDetails = analyzeCacheDetails(rawHeaders, mainDocumentResponse);
+                const cacheProviderStatus = mainCacheDetails.summary;
+
+                // Per-resource response collection and CDN/Edge detection
+                const resourceEvidenceList = [];
+                for (const [reqId, req] of requests.entries()) {
+                    if (!req.url || !/^https?:\/\//i.test(req.url)) continue;
+
+                    const mergedHeaders = {};
+                    if (req.response && req.response.headers) {
+                        for (const [k, v] of Object.entries(req.response.headers)) {
+                            mergedHeaders[k.toLowerCase()] = String(v);
+                        }
+                    }
+                    if (req.rawResponseHeaders) {
+                        for (const [k, v] of Object.entries(req.rawResponseHeaders)) {
+                            mergedHeaders[k.toLowerCase()] = String(v);
+                        }
+                    }
+
+                    const cleanHeaders = scrubSensitiveHeaders(mergedHeaders);
+                    const remoteIp = req.response?.remoteIPAddress || null;
+                    const remotePort = req.response?.remotePort || null;
+                    const protocol = req.response?.protocol || null;
+                    const statusCode = req.response?.status || (req.failed ? 0 : 200);
+
+                    const resourceCdn = detectResourceCdn(cleanHeaders, req.url, req.type, remoteIp, remotePort);
+                    const resourceCacheDetails = analyzeCacheDetails(cleanHeaders, req.response);
+                    const resourceCache = resourceCacheDetails.summary;
+
+                    resourceEvidenceList.push({
+                        requestId: reqId,
+                        url: req.url,
+                        hostname: resourceCdn.hostname,
+                        resourceType: req.type || 'Other',
+                        statusCode,
+                        protocol,
+                        remoteIPAddress: remoteIp,
+                        remotePort,
+                        encodedDataLength: req.encodedDataLength || 0,
+                        failed: req.failed || false,
+                        canceled: req.canceled || false,
+                        redirects: req.redirects || [],
+                        headers: cleanHeaders,
+                        cdn: resourceCdn,
+                        edge: resourceCdn.edge,
+                        cacheStatus: resourceCache,
+                        cacheDetails: resourceCacheDetails
+                    });
+                }
+
+                // Group by host to support multi-CDN architectures
+                const hostAnalysis = aggregateHostCdn(resourceEvidenceList, finalUrl);
+
+                // Main document edge evidence
+                const mainRemoteIp = metricsResult.connection?.remoteIp || (mainDocumentResponse ? mainDocumentResponse.remoteIPAddress : null);
+                const mainRemotePort = mainDocumentResponse ? mainDocumentResponse.remotePort : null;
+                const mainEdge = extractEdgeEvidence(rawHeaders, cdnResult.provider, mainRemoteIp, mainRemotePort);
+                cdnResult.edge = mainEdge;
+                cdnResult.byHost = hostAnalysis.byHost;
+                cdnResult.allProviders = hostAnalysis.allProviders;
 
                 notifyProgress("Checking Security Headers...");
                 const securityResult = analyzeSecurity(finalUrl, mainDocumentResponse, rawHeaders);
@@ -235,6 +419,7 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress) {
                     timing: metricsResult.timing,
                     cacheStatus: cacheProviderStatus,
                     headers: rawHeaders,
+                    compression: metricsResult.connection.compression,
                     failedRequestCount: resourcesResult.failedRequestCount,
                     protocol: metricsResult.connection.protocol
                 });
@@ -255,7 +440,7 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress) {
                     mainDocumentResponse.fromPrefetchCache ? 'prefetch' : 'network'
                 ) : 'network';
 
-                resolve({
+                const finalResult = {
                     schemaVersion: 2,
                     requestedUrl,
                     finalUrl,
@@ -265,7 +450,11 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress) {
                     transfer: {
                         requestCount: resourcesResult.requestCount,
                         failedRequestCount: resourcesResult.failedRequestCount,
+                        canceledRequestCount: resourcesResult.canceledRequestCount,
+                        cachedRequestCount: resourcesResult.cachedRequestCount,
+                        serviceWorkerRequestCount: resourcesResult.serviceWorkerRequestCount,
                         encodedBytes: resourcesResult.encodedBytes,
+                        decodedBytes: resourcesResult.decodedBytes,
                         firstPartyCount: resourcesResult.firstPartyCount,
                         thirdPartyCount: resourcesResult.thirdPartyCount,
                         breakdown: resourcesResult.breakdown
@@ -274,21 +463,31 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress) {
                     tls: securityResult.tls,
                     securityHeaders: securityResult.headers,
                     cdn: cdnResult,
+                    cdnByHost: hostAnalysis.byHost,
+                    allProviders: hostAnalysis.allProviders,
+                    resourceEvidence: resourceEvidenceList,
                     cache: {
                         documentSource,
-                        providerStatus: cacheProviderStatus
+                        providerStatus: cacheProviderStatus,
+                        details: mainCacheDetails
                     },
                     scoreDetails,
                     suggestions,
                     timestamp: new Date().toISOString()
-                });
+                };
+                requests.clear();
+                extraInfoBuffer.clear();
+                resolve(finalResult);
             } catch (err) {
+                requests.clear();
+                extraInfoBuffer.clear();
                 reject(err);
             }
         }
 
         function cdpEventListener(source, method, params) {
             if (source.tabId !== tabId) return;
+            if (isResolved || cancelToken?.isCancelled) return;
 
             const now = performance.now();
             lastActivityTime = params.timestamp ? params.timestamp * 1000 : now;
@@ -330,30 +529,55 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress) {
                     }
                 }
 
-                const entry = {
-                    url: params.request.url,
-                    type: params.type,
-                    requestWillBeSentTime: eventTimeMs,
-                    response: null,
-                    responseReceivedTime: null,
-                    loadingFinishedTime: null,
-                    encodedDataLength: 0,
-                    rawResponseHeaders: null,
-                    failed: false
-                };
-
-                // BUG-02 FIX: If ExtraInfo arrived before this request was
-                // registered, pull it from the buffer and attach it now.
-                if (extraInfoBuffer.has(reqId)) {
-                    entry.rawResponseHeaders = extraInfoBuffer.get(reqId);
-                    extraInfoBuffer.delete(reqId);
-                    // Also update the main document ExtraInfo store if applicable.
-                    if (params.type === 'Document') {
-                        mainExtraHeadersStore = entry.rawResponseHeaders;
+                let entry = requests.get(reqId);
+                if (entry) {
+                    if (params.redirectResponse) {
+                        if (!entry.redirects) entry.redirects = [];
+                        entry.redirects.push({
+                            url: entry.url,
+                            status: params.redirectResponse.status,
+                            headers: params.redirectResponse.headers || {},
+                            remoteIPAddress: params.redirectResponse.remoteIPAddress || null
+                        });
                     }
-                }
+                    entry.url = params.request.url;
+                    entry.type = params.type || entry.type;
+                } else {
+                    entry = {
+                        url: params.request.url,
+                        type: params.type,
+                        requestWillBeSentTime: eventTimeMs,
+                        response: null,
+                        responseReceivedTime: null,
+                        loadingFinishedTime: null,
+                        encodedDataLength: 0,
+                        rawResponseHeaders: null,
+                        failed: false,
+                        redirects: []
+                    };
 
-                requests.set(reqId, entry);
+                    if (params.redirectResponse) {
+                        entry.redirects.push({
+                            url: params.redirectResponse.url || params.request.url,
+                            status: params.redirectResponse.status,
+                            headers: params.redirectResponse.headers || {},
+                            remoteIPAddress: params.redirectResponse.remoteIPAddress || null
+                        });
+                    }
+
+                    // BUG-02 FIX: If ExtraInfo arrived before this request was
+                    // registered, pull it from the buffer and attach it now.
+                    if (extraInfoBuffer.has(reqId)) {
+                        entry.rawResponseHeaders = extraInfoBuffer.get(reqId);
+                        extraInfoBuffer.delete(reqId);
+                        // Also update the main document ExtraInfo store if applicable.
+                        if (params.type === 'Document') {
+                            mainExtraHeadersStore = entry.rawResponseHeaders;
+                        }
+                    }
+
+                    requests.set(reqId, entry);
+                }
 
             } else if (method === 'Network.responseReceived') {
                 const reqId = params.requestId;
@@ -389,6 +613,16 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress) {
                     }
                 }
 
+            } else if (method === 'Network.requestServedFromCache') {
+                const reqId = params.requestId;
+                const reqData = requests.get(reqId);
+                if (reqData) {
+                    reqData.servedFromCache = true;
+                    if (reqData.response) {
+                        reqData.response.fromMemoryCache = true;
+                    }
+                }
+
             } else if (method === 'Network.loadingFinished') {
                 const reqId = params.requestId;
                 const reqData = requests.get(reqId);
@@ -402,19 +636,12 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress) {
                 const reqId = params.requestId;
                 const reqData = requests.get(reqId);
                 if (reqData) {
-                    // BUG-05 FIX: Only mark as truly failed when:
-                    //   (a) The request was explicitly cancelled/aborted by the browser
-                    //       (params.canceled or net::ERR_ABORTED) — these are benign
-                    //       navigational artifacts and must NOT be counted.
-                    //   (b) The request has no prior response recorded at all, meaning
-                    //       it failed at the network level before any response arrived.
-                    //   (c) The request has a prior response but with HTTP status >= 400.
-                    //
-                    // This prevents streaming/media resources that finish normally
-                    // from being counted as failures ("Failed=1, HTTP Status=200").
-                    const isCanceled = params.canceled || params.errorText === 'net::ERR_ABORTED';
+                    // Distinguish user/browser cancelled requests from network failures
+                    const isCanceled = Boolean(params.canceled || params.errorText === 'net::ERR_ABORTED');
+                    reqData.canceled = isCanceled;
+
                     if (isCanceled) {
-                        // Benign browser-cancelled request — not a real failure.
+                        // Benign browser-cancelled request — not an unexpected failure.
                         reqData.failed = false;
                     } else {
                         const existingStatus = reqData.response ? reqData.response.status : null;
@@ -445,6 +672,10 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress) {
             mainNavigationStart = performance.now();
             await cdpSend(tabId, "Page.navigate", { url: targetUrl });
         } catch (err) {
+            if (cancelToken?.isCancelled) {
+                abortAnalysis(new Error("Analysis cancelled"));
+                return;
+            }
             console.warn("[CDP Engine v2] Page.navigate returned error:", err.message);
             if (mainDocumentResponse || requests.size > 0) {
                 if (!idleTimer) {
@@ -453,8 +684,7 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress) {
                     }, 1500);
                 }
             } else {
-                cleanupListeners();
-                reject(err);
+                abortAnalysis(err);
             }
         }
     });
