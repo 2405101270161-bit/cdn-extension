@@ -19,7 +19,7 @@
 
 ## 2. Test Suites & Tests Executed
 
-A total of **92 deterministic automated tests** were executed across 8 dedicated test suites, alongside a live network smoke-test script:
+A total of **94 deterministic automated tests** were executed across 8 dedicated test suites, alongside a live network smoke-test script:
 
 | Test Suite File | Scope | Tests Run | Result |
 | :--- | :--- | :---: | :---: |
@@ -30,8 +30,8 @@ A total of **92 deterministic automated tests** were executed across 8 dedicated
 | [tests/test_lifecycle.mjs](file:///c:/Users/ayush/OneDrive/Desktop/cdn%20extension%20fixed/tests/test_lifecycle.mjs) | Fresh state on start, generation counter isolation, cancel token abort, debugger cleanup | 7 | **7 PASSED** |
 | [tests/test_integration.mjs](file:///c:/Users/ayush/OneDrive/Desktop/cdn%20extension%20fixed/tests/test_integration.mjs) | End-to-end pipeline with synthetic CDP events (origin HTML, CDN assets, multi-host) | 8 | **8 PASSED** |
 | [tests/test_goal3_metrics.mjs](file:///c:/Users/ayush/OneDrive/Desktop/cdn%20extension%20fixed/tests/test_goal3_metrics.mjs) | Regression verification for Goal 3 metrics, transfer accounting, and public suffixes | 14 | **14 PASSED** |
-| [tests/test_reliability.mjs](file:///c:/Users/ayush/OneDrive/Desktop/cdn%20extension%20fixed/tests/test_reliability.mjs) | **New (Goal 5)**: Debugger attach failure, premature tab closure, detach, cancel, timeout, late CDP events, service worker recovery, credential scrubbing | 12 | **12 PASSED** |
-| **Total Automated Tests** | | **92** | **92 PASSED** |
+| [tests/test_reliability.mjs](file:///c:/Users/ayush/OneDrive/Desktop/cdn%20extension%20fixed/tests/test_reliability.mjs) | **New (Goal 5)**: Debugger attach failure, premature tab closure, timeout, cancel, concurrent requests, detach, late CDP events, idempotent cleanup, error recovery, worker restart, non-owned tab safety, timer cleanup, secret scrubbing | 14 | **14 PASSED** |
+| **Total Automated Tests** | | **94** | **94 PASSED** |
 
 ---
 
