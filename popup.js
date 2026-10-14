@@ -575,7 +575,7 @@ function initPopup() {
                 <!-- Website information -->
                 <div class="card site-card">
                     <div class="site-head">
-                        <img class="site-favicon" alt="" src="https://www.google.com/s2/favicons?sz=64&domain=${encodeURIComponent(host)}">
+                        <img class="site-favicon" alt="" src="https://www.google.com/s2/favicons?sz=64&domain=${encodeURIComponent(host)}" onerror="this.style.display='none'">
                         <div style="min-width:0">
                             <div class="site-host">${escapeHtml(host)}</div>
                             <div class="site-url">${escapeHtml(finalUrl)}</div>
