@@ -61,7 +61,7 @@ for (const s of summary) {
 console.log("==================================================================");
 
 if (allPassed) {
-    console.log("ALL 8 TEST SUITES (92 DETERMINISTIC TESTS) PASSED SUCCESSFULLY!");
+    console.log("ALL 8 TEST SUITES (94 DETERMINISTIC TESTS) PASSED SUCCESSFULLY!");
     process.exit(0);
 } else {
     console.error("SOME TEST SUITES ENCOUNTERED FAILURES!");
