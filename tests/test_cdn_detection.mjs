@@ -1,15 +1,12 @@
-/**
- * Test Suite: CDN Provider Detection
- * Tests supported CDN providers, header variations, edge cases, multi-CDN delivery,
- * and origin vs CDN resource scenarios.
- */
-
 import assert from 'node:assert';
 import {
     detectCdnProvider,
     detectResourceCdn,
     aggregateHostCdn,
-    normalizeHeaders
+    normalizeHeaders,
+    detectCdnFromCname,
+    detectCdnFromIp,
+    resolveDnsCname
 } from '../modules/cdn.js';
 
 console.log("=================================================");
@@ -32,7 +29,6 @@ function test(name, fn) {
     }
 }
 
-// 1. Cloudflare Detection
 test("Valid Cloudflare headers (cf-ray and server)", () => {
     const res = detectCdnProvider({
         'cf-ray': '8f3bc4928b971234-IAD',
@@ -43,7 +39,6 @@ test("Valid Cloudflare headers (cf-ray and server)", () => {
     assert.ok(res.evidence.some(e => e.includes('cf-ray')));
 });
 
-// 2. Cloudflare R2 Detection
 test("Valid Cloudflare R2 headers (distinct from standard Cloudflare)", () => {
     const res = detectCdnProvider({
         'x-amz-meta-cf-r2-structure': '1',
@@ -53,7 +48,6 @@ test("Valid Cloudflare R2 headers (distinct from standard Cloudflare)", () => {
     assert.strictEqual(res.confidence, 'high');
 });
 
-// 3. Amazon CloudFront Detection
 test("Valid Amazon CloudFront headers (x-amz-cf-id, via, and x-amz-cf-pop)", () => {
     const res = detectCdnProvider({
         'x-amz-cf-id': 'xyz1234567890abcdef==',
@@ -65,7 +59,6 @@ test("Valid Amazon CloudFront headers (x-amz-cf-id, via, and x-amz-cf-pop)", () 
     assert.ok(res.evidence.some(e => e.includes('x-amz-cf-id')));
 });
 
-// 4. Fastly Detection
 test("Valid Fastly headers (x-fastly-request-id and x-served-by)", () => {
     const res = detectCdnProvider({
         'x-fastly-request-id': 'abc123456789',
@@ -77,7 +70,6 @@ test("Valid Fastly headers (x-fastly-request-id and x-served-by)", () => {
     assert.ok(res.evidence.some(e => e.includes('x-fastly-request-id')));
 });
 
-// 5. Akamai Detection
 test("Valid Akamai headers (akamai-grn and x-akamai-transformed)", () => {
     const res = detectCdnProvider({
         'akamai-grn': '0.12345.6789.abcdef',
@@ -89,18 +81,19 @@ test("Valid Akamai headers (akamai-grn and x-akamai-transformed)", () => {
     assert.ok(res.evidence.some(e => e.includes('akamai-grn') || e.includes('AkamaiGHost')));
 });
 
-// 6. Google Cloud CDN Detection
-test("Valid Google Cloud CDN headers (x-goog-generation and via)", () => {
+test("Google edge + Cloud Storage headers are not reported as confirmed Google Cloud CDN", () => {
     const res = detectCdnProvider({
         'x-goog-generation': '1234567890',
         'via': '1.1 google',
         'server': 'UploadServer'
     });
-    assert.strictEqual(res.provider, 'Google Cloud CDN');
-    assert.strictEqual(res.confidence, 'high');
+    assert.strictEqual(res.provider, 'Google Front End', "GFE is the delivery edge");
+    assert.strictEqual(res.status, 'network-only', "GFE evidence is edge ownership, not product-specific");
+    assert.notStrictEqual(res.provider, 'Google Cloud CDN');
+    assert.ok(res.possibleLayers.some(l => l.provider === 'Google Cloud Storage' && l.role === 'origin-storage'), "GCS recorded as origin storage");
+    assert.ok(res.notes.some(n => n.includes('does not confirm the Google Cloud CDN')));
 });
 
-// 7. Microsoft Azure CDN / Front Door Detection
 test("Valid Azure Front Door headers (x-azure-ref)", () => {
     const res = detectCdnProvider({
         'x-azure-ref': '0abcd1234efgh5678',
@@ -110,7 +103,6 @@ test("Valid Azure Front Door headers (x-azure-ref)", () => {
     assert.strictEqual(res.confidence, 'high');
 });
 
-// 8. Vercel Detection
 test("Valid Vercel headers (x-vercel-id and x-vercel-cache)", () => {
     const res = detectCdnProvider({
         'x-vercel-id': 'iad1::iad1::12345-67890',
@@ -120,7 +112,6 @@ test("Valid Vercel headers (x-vercel-id and x-vercel-cache)", () => {
     assert.strictEqual(res.confidence, 'high');
 });
 
-// 9. Netlify Detection
 test("Valid Netlify headers (x-nf-request-id and server)", () => {
     const res = detectCdnProvider({
         'x-nf-request-id': '01ARZ3NDEKTSV4RRFFQ69G5FAV',
@@ -130,17 +121,15 @@ test("Valid Netlify headers (x-nf-request-id and server)", () => {
     assert.strictEqual(res.confidence, 'high');
 });
 
-// 10. BunnyCDN Detection
-test("Valid BunnyCDN headers (b-ray and server)", () => {
+test("Valid BunnyCDN headers (server banner and pull zone)", () => {
     const res = detectCdnProvider({
-        'b-ray': '123456-iad',
+        'cdn-pullzone': '123456',
         'server': 'BunnyCDN-IL1'
     });
     assert.strictEqual(res.provider, 'BunnyCDN');
     assert.strictEqual(res.confidence, 'high');
 });
 
-// 11. Missing headers (empty headers object)
 test("Missing headers safely yield Not Detected with none confidence", () => {
     const res = detectCdnProvider({});
     assert.strictEqual(res.provider, 'Not Detected');
@@ -148,7 +137,6 @@ test("Missing headers safely yield Not Detected with none confidence", () => {
     assert.strictEqual(res.evidence.length, 0);
 });
 
-// 12. Case-insensitive header names
 test("Case-insensitive header names (uppercase, mixed case)", () => {
     const res = detectCdnProvider({
         'CF-RAY': '99999999999-LHR',
@@ -159,7 +147,6 @@ test("Case-insensitive header names (uppercase, mixed case)", () => {
     assert.strictEqual(res.confidence, 'high');
 });
 
-// 13. Malformed header values (empty strings, numbers, nulls)
 test("Malformed header values do not crash or produce false positive detections", () => {
     const res = detectCdnProvider({
         'server': '',
@@ -172,20 +159,18 @@ test("Malformed header values do not crash or produce false positive detections"
     assert.strictEqual(res.confidence, 'none');
 });
 
-// 14. Ambiguous / multi-layer provider evidence (e.g. Vercel hosted behind Cloudflare proxy)
 test("Ambiguous/conflicting multi-layer headers preserved in possibleLayers", () => {
     const res = detectCdnProvider({
         'cf-ray': '8f3bc4928b971234-IAD',
         'server': 'cloudflare',
         'x-vercel-id': 'iad1::iad1::12345-67890'
     });
-    // Both providers have high evidence; primary is chosen deterministically and other is retained in possibleLayers
+
     assert.ok(res.provider === 'Cloudflare' || res.provider === 'Vercel');
     assert.strictEqual(res.confidence, 'high');
     assert.ok(res.possibleLayers.length > 0, "Secondary layer must be tracked in possibleLayers");
 });
 
-// 15. Generic cache headers without CDN evidence
 test("Generic Cache-Control and Expires headers do not produce a false CDN detection", () => {
     const res = detectCdnProvider({
         'server': 'Apache/2.4.52 (Ubuntu)',
@@ -197,10 +182,9 @@ test("Generic Cache-Control and Expires headers do not produce a false CDN detec
     assert.strictEqual(res.confidence, 'none');
 });
 
-// 16. Multiple CDN providers on the same website (Multi-CDN asset delivery)
 test("Multiple CDN providers on same site grouped accurately by host", () => {
     const resources = [
-        // Main page HTML from origin
+
         {
             url: 'https://example.com/',
             hostname: 'example.com',
@@ -209,7 +193,7 @@ test("Multiple CDN providers on same site grouped accurately by host", () => {
             edge: { edgePop: null, remoteIp: '192.0.2.1' },
             encodedDataLength: 15000
         },
-        // Static assets from CloudFront
+
         {
             url: 'https://cdn.example.com/bundle.js',
             hostname: 'cdn.example.com',
@@ -218,7 +202,7 @@ test("Multiple CDN providers on same site grouped accurately by host", () => {
             edge: { edgePop: 'IAD89-C1', remoteIp: '13.224.10.45' },
             encodedDataLength: 85000
         },
-        // Images from Fastly
+
         {
             url: 'https://images.example.com/hero.png',
             hostname: 'images.example.com',
@@ -241,7 +225,6 @@ test("Multiple CDN providers on same site grouped accurately by host", () => {
     assert.strictEqual(hostAnalysis.byHost['images.example.com'].provider, 'Fastly');
 });
 
-// 17. HTML served directly while assets are served through CDN
 test("HTML served directly from origin while scripts/images are CDN-served", () => {
     const htmlResource = detectResourceCdn({
         'server': 'nginx/1.22.0',
@@ -257,7 +240,6 @@ test("HTML served directly from origin while scripts/images are CDN-served", () 
     assert.strictEqual(jsResource.provider, 'Cloudflare', "JavaScript asset is CDN-served");
 });
 
-// 18. Domain name alone never implies a specific CDN (No hardcoded domain guesses)
 test("Domain names alone (google.com, flipkart.com) never imply a CDN without headers", () => {
     const googleNoHeaders = detectCdnProvider({
         'server': 'gws',
@@ -270,6 +252,74 @@ test("Domain names alone (google.com, flipkart.com) never imply a CDN without he
         'content-type': 'text/html'
     });
     assert.strictEqual(flipkartNoHeaders.provider, 'Not Detected', "No assumption that flipkart.com uses a specific CDN");
+});
+
+test("DNS CNAME detection detects CDN with medium confidence", () => {
+    const cnameRes = detectCdnFromCname(['cdn.example.com.cdn.cloudflare.net']);
+    assert.ok(cnameRes !== null);
+    assert.strictEqual(cnameRes.provider, 'Cloudflare');
+    assert.strictEqual(cnameRes.confidence, 'medium');
+
+    const fastlyCname = detectCdnFromCname(['dualstack.f.ssl.fastly.net']);
+    assert.ok(fastlyCname !== null);
+    assert.strictEqual(fastlyCname.provider, 'Fastly');
+});
+
+test("IP ownership fallback detects CDN with low confidence", () => {
+    const cfIp = detectCdnFromIp('104.21.5.12');
+    assert.ok(cfIp !== null);
+    assert.strictEqual(cfIp.provider, 'Cloudflare');
+    assert.strictEqual(cfIp.confidence, 'low');
+
+    const fastlyIp = detectCdnFromIp('151.101.65.140');
+    assert.ok(fastlyIp !== null);
+    assert.strictEqual(fastlyIp.provider, 'Fastly');
+    assert.strictEqual(fastlyIp.confidence, 'low');
+
+    const unknownIp = detectCdnFromIp('1.1.1.1');
+    assert.strictEqual(unknownIp, null);
+});
+
+test("Evidence hierarchy prioritizes headers over CNAME and CNAME over IP", () => {
+    const headerOverride = detectCdnProvider({
+        'cf-ray': '123456789-IAD',
+        'server': 'cloudflare'
+    }, {
+        cnames: ['d123.cloudfront.net'],
+        remoteIp: '151.101.1.1'
+    });
+    assert.strictEqual(headerOverride.provider, 'Cloudflare', "Headers take primary precedence");
+    assert.strictEqual(headerOverride.confidence, 'high');
+    assert.strictEqual(headerOverride.detectionMethod, 'response-header-inspection');
+    assert.ok(headerOverride.possibleLayers.some(l => l.provider === 'Amazon CloudFront'), "CNAME preserved in possible layers");
+
+    const cnameFallback = detectCdnProvider({
+        'server': 'nginx'
+    }, {
+        cnames: ['my-app.b-cdn.net'],
+        remoteIp: '104.16.1.1'
+    });
+    assert.strictEqual(cnameFallback.provider, 'BunnyCDN', "CNAME takes secondary precedence over IP");
+    assert.strictEqual(cnameFallback.confidence, 'medium');
+    assert.strictEqual(cnameFallback.detectionMethod, 'dns-cname-inspection');
+    assert.ok(cnameFallback.possibleLayers.some(l => l.provider === 'Cloudflare'), "IP fallback preserved in possible layers");
+
+    const ipFallback = detectCdnProvider({
+        'server': 'Apache'
+    }, {
+        remoteIp: '104.16.10.20'
+    });
+    assert.strictEqual(ipFallback.provider, 'Cloudflare', "IP fallback works when headers and CNAME missing");
+    assert.strictEqual(ipFallback.confidence, 'low');
+    assert.strictEqual(ipFallback.detectionMethod, 'ip-range-fallback');
+});
+
+test("DNS CNAME resolution gracefully handles invalid hostnames and network errors", async () => {
+    const invalidRes = await resolveDnsCname('invalid hostname with spaces');
+    assert.strictEqual(invalidRes, null, "Invalid host safely returns null");
+
+    const localhostRes = await resolveDnsCname('localhost');
+    assert.strictEqual(localhostRes, null, "Localhost safely returns null");
 });
 
 console.log("=================================================");

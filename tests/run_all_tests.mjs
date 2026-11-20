@@ -1,9 +1,3 @@
-/**
- * Unified Test Runner for CDN Analyzer Pro
- * Executes all automated regression test suites across CDN detection,
- * edge identification, network timing, cache analysis, lifecycle, and integration.
- */
-
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,8 +13,13 @@ const suites = [
     { name: "6. End-to-End Pipeline Integration", file: "test_integration.mjs" },
     { name: "7. Metrics & Accounting Verification", file: "test_goal3_metrics.mjs" },
     { name: "8. Reliability & Error Handling", file: "test_reliability.mjs" },
-    { name: "9. Report Generation & Result Clarity", file: "test_report_ui.mjs" }
+    { name: "9. Analysis Report Generation & Lifecycle Fix", file: "test_analysis_report_fix.mjs" },
+    { name: "10. Frontend UI/UX Refinement & Responsive Layout", file: "test_ui_refinement.mjs" },
+    { name: "11. Evidence Accuracy & False-Positive Controls", file: "test_evidence_accuracy.mjs" }
 ];
+
+let totalTests = 0;
+let totalPassed = 0;
 
 console.log("==================================================================");
 console.log("CDN ANALYZER PRO — AUTOMATED REGRESSION TEST SUITE RUNNER");
@@ -36,11 +35,20 @@ for (const suite of suites) {
     const result = await new Promise((resolve) => {
         const child = spawn(process.execPath, [fullPath], {
             cwd: path.join(__dirname, '..'),
-            stdio: 'inherit'
+            stdio: ['ignore', 'pipe', 'pipe']
         });
+        let out = '';
+        child.stdout.on('data', (d) => { out += d; process.stdout.write(d); });
+        child.stderr.on('data', (d) => { process.stderr.write(d); });
 
         child.on('close', (code) => {
-            resolve({ suite: suite.name, code });
+            // Count from each suite's own "<passed> of <total>" summary line.
+            const m = out.match(/(\d+) of (\d+)[^\n]*(?:passed|PASSED)/);
+            if (m) {
+                totalPassed += parseInt(m[1], 10);
+                totalTests += parseInt(m[2], 10);
+            }
+            resolve({ suite: suite.name, code: m ? code : (code || 1) });
         });
     });
 
@@ -62,9 +70,9 @@ for (const s of summary) {
 console.log("==================================================================");
 
 if (allPassed) {
-    console.log(`ALL ${suites.length} TEST SUITES (135 DETERMINISTIC TESTS) PASSED SUCCESSFULLY!`);
+    console.log(`ALL ${suites.length} TEST SUITES (${totalPassed} of ${totalTests} DETERMINISTIC TESTS) PASSED SUCCESSFULLY!`);
     process.exit(0);
 } else {
-    console.error("SOME TEST SUITES ENCOUNTERED FAILURES!");
+    console.error(`SOME TEST SUITES ENCOUNTERED FAILURES! (${totalPassed} of ${totalTests} tests passed)`);
     process.exit(1);
 }

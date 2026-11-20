@@ -1,12 +1,11 @@
 {
   "manifest_version": 3,
   "name": "CDN Analyzer Pro",
-  "version": "2.0.0",
-  "description": "Analyzes CDN usage, network timing, security headers, and asset payloads using Chrome DevTools Protocol.",
+  "version": "2.1.0",
+  "description": "Identify the CDN, cache status, security headers and network timing behind any website, with the evidence for every result.",
   "permissions": [
     "activeTab",
     "storage",
-    "tabs",
     "debugger"
   ],
   "host_permissions": [
@@ -21,16 +20,17 @@
     "default_popup": "popup.html",
     "default_title": "CDN Analyzer Pro",
     "default_icon": {
-      "16": "icons/icon-v7.png",
-      "32": "icons/icon-v7.png",
-      "48": "icons/icon-v7.png",
-      "128": "icons/icon-v7.png"
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
     }
   },
   "icons": {
-    "16": "icons/icon-v7.png",
-    "32": "icons/icon-v7.png",
-    "48": "icons/icon-v7.png",
-    "128": "icons/icon-v7.png"
-  }
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "minimum_chrome_version": "120"
 }

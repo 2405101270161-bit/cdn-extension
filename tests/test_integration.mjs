@@ -1,10 +1,3 @@
-/**
- * Test Suite: End-to-End CDP Pipeline Integration Tests
- * Uses controlled synthetic CDP event streams and fixtures to validate full pipeline integration:
- * Origin HTML, CDN-served assets, multi-host architectures, delayed assets, redirect chains,
- * failed/canceled requests, cache decomposition, and protocol reporting.
- */
-
 import assert from 'node:assert';
 import { calculateMetrics } from '../modules/metrics.js';
 import { analyzeResources } from '../modules/resources.js';
@@ -39,9 +32,6 @@ function test(name, fn) {
     }
 }
 
-/**
- * Simulates a full CDP run through the pipeline
- */
 function runSimulatedPipeline({
     targetUrl,
     finalUrl,
@@ -52,7 +42,7 @@ function runSimulatedPipeline({
     loadEventTime,
     lastActivityTime
 }) {
-    // 1. Metrics calculation
+
     const mainReqEntry = [...requestsMap.entries()].find(([_, r]) => r.type === 'Document');
     const mainRequestId = mainReqEntry ? mainReqEntry[0] : 'main-req';
 
@@ -66,7 +56,6 @@ function runSimulatedPipeline({
         lastActivityTime
     });
 
-    // 2. Main headers merge
     const rawHeaders = {};
     if (mainDocumentResponse?.headers) {
         for (const [k, v] of Object.entries(mainDocumentResponse.headers)) {
@@ -78,7 +67,6 @@ function runSimulatedPipeline({
     const mainCacheDetails = analyzeCacheDetails(rawHeaders, mainDocumentResponse);
     const cacheProviderStatus = mainCacheDetails.summary;
 
-    // 3. Per-resource evidence
     const resourceEvidenceList = [];
     for (const [reqId, req] of requestsMap.entries()) {
         if (!req.url || !/^https?:\/\//i.test(req.url)) continue;
@@ -118,17 +106,14 @@ function runSimulatedPipeline({
         });
     }
 
-    // 4. Multi-host grouping
     const hostAnalysis = aggregateHostCdn(resourceEvidenceList, finalUrl || targetUrl);
     cdnResult.edge = extractEdgeEvidence(rawHeaders, cdnResult.provider, metricsResult.connection.remoteIp, null);
     cdnResult.byHost = hostAnalysis.byHost;
     cdnResult.allProviders = hostAnalysis.allProviders;
 
-    // 5. Security & Resources
     const securityResult = analyzeSecurity(finalUrl || targetUrl, mainDocumentResponse, rawHeaders);
     const resourcesResult = analyzeResources(finalUrl || targetUrl, requestsMap);
 
-    // 6. Scoring & Suggestions
     const scoreDetails = calculatePerformanceScore({
         isHttps: securityResult.isHttps,
         timing: metricsResult.timing,
@@ -162,9 +147,6 @@ function runSimulatedPipeline({
     };
 }
 
-// -------------------------------------------------------------
-// Test 1: Origin-Only Website (No CDN, standard Apache web server)
-// -------------------------------------------------------------
 test("Origin-only website: no CDN false positives, accurate resource and cache reporting", () => {
     const requests = new Map();
     requests.set("doc-1", {
@@ -207,17 +189,14 @@ test("Origin-only website: no CDN false positives, accurate resource and cache r
     assert.strictEqual(result.resourcesResult.firstPartyCount, 1);
     assert.strictEqual(result.resourcesResult.thirdPartyCount, 0);
     assert.strictEqual(result.scoreDetails.score > 0, true);
-    // Should suggest routing through CDN since origin-only
-    assert.ok(result.suggestions.some(s => s.title.includes("Edge CDN Network")));
+
+    assert.ok(result.suggestions.some(s => s.title === "No CDN Signature Identified"), "Unidentified CDN is reported as unknown, not as direct origin");
+    assert.ok(!result.suggestions.some(s => /direct(ly)? from (an )?origin server increases/i.test(s.desc)), "No unsupported direct-origin claim");
 });
 
-// -------------------------------------------------------------
-// Test 2: HTML with CDN-served static assets
-// -------------------------------------------------------------
 test("HTML served from origin while static assets are served through distinct CDNs", () => {
     const requests = new Map();
 
-    // Main HTML: origin server
     requests.set("r-html", {
         url: "https://shop.example.com/",
         type: "Document",
@@ -233,7 +212,6 @@ test("HTML served from origin while static assets are served through distinct CD
         }
     });
 
-    // Script: Cloudflare
     requests.set("r-js", {
         url: "https://cdn.example.com/app.js",
         type: "Script",
@@ -253,7 +231,6 @@ test("HTML served from origin while static assets are served through distinct CD
         }
     });
 
-    // Image: Amazon CloudFront
     requests.set("r-img", {
         url: "https://images.example.com/logo.png",
         type: "Image",
@@ -292,18 +269,13 @@ test("HTML served from origin while static assets are served through distinct CD
     assert.strictEqual(result.resourcesResult.breakdown.image.count, 1);
 });
 
-// -------------------------------------------------------------
-// Test 3: Multiple resource hosts with public suffix (.co.uk)
-// -------------------------------------------------------------
 test("Multiple resource hosts on multi-part public suffix (.co.uk) classified accurately", () => {
     const requests = new Map();
 
-    // Target domain: www.company.co.uk
     requests.set("h1", { url: "https://www.company.co.uk/", type: "Document" });
     requests.set("h2", { url: "https://api.company.co.uk/v1/user", type: "XHR" });
     requests.set("h3", { url: "https://static.company.co.uk/style.css", type: "Stylesheet" });
 
-    // 3rd party on same ccTLD
     requests.set("h4", { url: "https://analytics.track.co.uk/p.gif", type: "Image" });
     requests.set("h5", { url: "https://fonts.thirdparty.co.uk/font.woff2", type: "Font" });
 
@@ -319,35 +291,29 @@ test("Multiple resource hosts on multi-part public suffix (.co.uk) classified ac
     assert.strictEqual(result.resourcesResult.requestCount, 5);
 });
 
-// -------------------------------------------------------------
-// Test 4: Delayed assets and slowest resource highlight
-// -------------------------------------------------------------
 test("Delayed resources correctly identify slowest request duration", () => {
     const requests = new Map();
 
-    // Fast document
     requests.set("fast-doc", {
         url: "https://example.com/",
         type: "Document",
         requestWillBeSentTime: 100,
-        loadingFinishedTime: 250 // 150ms
+        loadingFinishedTime: 250 
     });
 
-    // Slow script
     requests.set("slow-js", {
         url: "https://example.com/heavy-bundle.js",
         type: "Script",
         requestWillBeSentTime: 200,
-        loadingFinishedTime: 1650, // 1450ms
+        loadingFinishedTime: 1650, 
         encodedDataLength: 350000
     });
 
-    // Fast image
     requests.set("fast-img", {
         url: "https://example.com/pic.jpg",
         type: "Image",
         requestWillBeSentTime: 250,
-        loadingFinishedTime: 400 // 150ms
+        loadingFinishedTime: 400 
     });
 
     const result = runSimulatedPipeline({
@@ -362,9 +328,6 @@ test("Delayed resources correctly identify slowest request duration", () => {
     assert.strictEqual(result.resourcesResult.highlights.slowestResource.durationMs, 1450);
 });
 
-// -------------------------------------------------------------
-// Test 5: Redirect chains
-// -------------------------------------------------------------
 test("Redirect chain associates final URL and tracks intermediate hops", () => {
     const requests = new Map();
 
@@ -395,9 +358,6 @@ test("Redirect chain associates final URL and tracks intermediate hops", () => {
     assert.strictEqual(result.resourceEvidenceList[0].redirects[1].url, "https://example.com/");
 });
 
-// -------------------------------------------------------------
-// Test 6: Failed and canceled requests
-// -------------------------------------------------------------
 test("Failed network request and browser-canceled request accounting", () => {
     const requests = new Map();
 
@@ -410,7 +370,6 @@ test("Failed network request and browser-canceled request accounting", () => {
         response: { status: 200, protocol: "h2", headers: {} }
     });
 
-    // Network connection drop
     requests.set("fail", {
         url: "https://example.com/data.json",
         type: "XHR",
@@ -419,7 +378,6 @@ test("Failed network request and browser-canceled request accounting", () => {
         canceled: false
     });
 
-    // User/browser canceled image prefetch
     requests.set("cancel", {
         url: "https://example.com/prefetch.jpg",
         type: "Image",
@@ -440,9 +398,6 @@ test("Failed network request and browser-canceled request accounting", () => {
     assert.strictEqual(result.resourcesResult.requestCount, 3);
 });
 
-// -------------------------------------------------------------
-// Test 7: Cache-related response headers
-// -------------------------------------------------------------
 test("Cache-related response headers categorized into distinct models", () => {
     const requests = new Map();
 
@@ -485,27 +440,21 @@ test("Cache-related response headers categorized into distinct models", () => {
     assert.strictEqual(result.resourceEvidenceList[1].cacheStatus, "Service Worker");
 });
 
-// -------------------------------------------------------------
-// Test 8: Mixed HTTP protocols (HTTP/3, HTTP/2, HTTP/1.1)
-// -------------------------------------------------------------
 test("Mixed HTTP protocol reporting across requests", () => {
     const requests = new Map();
 
-    // Main document over HTTP/3 (QUIC)
     requests.set("doc-h3", {
         url: "https://example.com/",
         type: "Document",
         response: { status: 200, protocol: "h3", headers: {} }
     });
 
-    // Asset over HTTP/2
     requests.set("script-h2", {
         url: "https://example.com/script.js",
         type: "Script",
         response: { status: 200, protocol: "h2", headers: {} }
     });
 
-    // Legacy iframe over HTTP/1.1
     requests.set("frame-h1", {
         url: "https://example.com/frame.html",
         type: "Document",
@@ -522,6 +471,79 @@ test("Mixed HTTP protocol reporting across requests", () => {
     assert.strictEqual(result.metricsResult.connection.protocol, "h3", "Main document connection is h3");
     assert.strictEqual(result.resourceEvidenceList[1].protocol, "h2");
     assert.strictEqual(result.resourceEvidenceList[2].protocol, "http/1.1");
+});
+
+test("Main document summary uses the primary navigation document, not late-arriving iframe documents", () => {
+    const requestsMap = new Map();
+
+    requestsMap.set("main-doc-req", {
+        url: "https://mysite.com/",
+        type: "Document",
+        requestWillBeSentTime: 1000,
+        responseReceivedTime: 1481.43,
+        loadingFinishedTime: 1481.43,
+        response: {
+            url: "https://mysite.com/",
+            status: 200,
+            protocol: "h2",
+            headers: {
+                "server": "cloudflare",
+                "cf-ray": "8f3bc4928b971234-ORD",
+                "content-type": "text/html"
+            },
+            timing: {
+                requestTime: 1.0,
+                dnsStart: 10,
+                dnsEnd: 25,
+                connectStart: 25,
+                connectEnd: 74,
+                sslStart: 45,
+                sslEnd: 74,
+                sendStart: 74,
+                sendEnd: 75.19,
+                receiveHeadersStart: 481.43,
+                receiveHeadersEnd: 481.43
+            }
+        }
+    });
+
+    requestsMap.set("iframe-subdocument-req", {
+        url: "https://thirdparty-ads.com/frame.html",
+        type: "Document",
+        requestWillBeSentTime: 1800,
+        responseReceivedTime: 2064,
+        loadingFinishedTime: 2070,
+        response: {
+            url: "https://thirdparty-ads.com/frame.html",
+            status: 200,
+            protocol: "h2",
+            headers: {
+                "server": "gws",
+                "content-type": "text/html"
+            },
+            timing: {
+                requestTime: 1.8,
+                sendStart: 5,
+                sendEnd: 6,
+                receiveHeadersStart: 270,
+                receiveHeadersEnd: 272
+            }
+        }
+    });
+
+    const result = runSimulatedPipeline({
+        targetUrl: "https://mysite.com/",
+        finalUrl: "https://mysite.com/",
+        mainDocumentResponse: requestsMap.get("main-doc-req").response,
+        requestsMap,
+        navigationStartCDP: 1000
+    });
+
+    assert.strictEqual(result.metricsResult.timing.ttfbMs, 406.24, "TTFB is from main document (481.43 - 75.19), not iframe (264)");
+    assert.strictEqual(result.cdnResult.provider, "Cloudflare", "CDN is from main document, not iframe");
+    assert.strictEqual(result.resourceEvidenceList.length, 2);
+    assert.strictEqual(result.resourceEvidenceList[0].hostname, "mysite.com");
+    assert.strictEqual(result.resourceEvidenceList[1].hostname, "thirdparty-ads.com");
 });
 
 console.log("=================================================");

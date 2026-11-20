@@ -4,33 +4,17 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CDN Analyzer Pro</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
     <div class="app">
-        <!-- Compact top bar: only visible once an analysis exists -->
+        
         <header class="topbar" id="topbar" hidden>
             <div class="topbar-brand">
                 <img class="topbar-logo" src="icons/icon-v7.png" alt="CDN Analyzer Pro logo">
                 <span class="topbar-name">CDN Analyzer</span>
             </div>
             <div class="topbar-actions">
-                <button id="copyReportBtn" class="ghost-btn" title="Copy Markdown Analysis Report" aria-label="Copy Markdown Analysis Report" type="button">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-                    </svg>
-                    <span>Copy</span>
-                </button>
-                <button id="exportJsonBtn" class="ghost-btn" title="Export Sanitized JSON" aria-label="Export Sanitized JSON" type="button">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                        <polyline points="7 10 12 15 17 10"></polyline>
-                        <line x1="12" y1="15" x2="12" y2="3"></line>
-                    </svg>
-                    <span>JSON</span>
-                </button>
                 <button id="refreshBtn" class="ghost-btn" title="Reset and clear analysis" aria-label="Reset and clear analysis" type="button">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <path d="M23 4v6h-6"></path>
@@ -43,7 +27,7 @@
         </header>
 
         <main class="main">
-            <!-- HOME: logo, name, tagline, search, analyze -->
+            
             <section class="hero" id="hero">
                 <img class="hero-logo" src="icons/icon-v7.png" alt="CDN Analyzer Pro logo">
                 <h1 class="hero-title">CDN Analyzer Pro</h1>

@@ -1,164 +1,164 @@
 # CDN Analyzer Pro (Manifest V3)
 
-**Version:** 2.0.0
-**Target:** Google Chrome 120+ (Manifest V3)
-**Architecture:** Background Service Worker + Chrome DevTools Protocol (CDP)
+**Version:** 2.1.0 · **Target:** Google Chrome 120+ · **Architecture:** service worker + Chrome DevTools Protocol (CDP)
+
+CDN Analyzer Pro loads a page in a temporary background tab, records the raw network
+traffic through the Chrome DevTools Protocol, and reports which CDN, edge, hosting or
+storage provider delivered the page and its assets, together with cache status,
+security headers and network timing. Every provider result lists the evidence behind it.
 
 ---
 
-## 1. Project Overview
+## 1. What changed in 2.1.0
 
-**CDN Analyzer Pro** is a high-precision, developer-grade Chrome Extension built on Manifest V3. It connects directly to the Chrome DevTools Protocol (CDP) to analyze network traffic, identify Content Delivery Networks (CDNs), inspect HTTP cache layers, calculate connection timings, verify security headers, and generate comprehensive audit reports.
+**Correctness**
+- "Not Detected" is no longer reported as "direct origin delivery". The report says
+  *No CDN signature found* and explains that this is not proof of origin delivery.
+- Generic headers (`x-cache`, `x-edge-location`, `cdn-cache`, `x-served-by`,
+  `x-check-cacheable`, `via: varnish`) can no longer produce a detection on their own.
+- Storage headers (`x-goog-*`, `x-amz-id-2`/`server: AmazonS3`, `x-oss-*`, `x-ms-blob-type`)
+  identify an **origin store**, never a CDN.
+- Google Front End (`via: 1.1 google`, `server: Google Frontend`) is reported as Google
+  edge infrastructure, not as confirmed Google Cloud CDN.
+- Evidence from headers, DNS CNAMEs and IP ranges is aggregated per provider. When two
+  delivery providers both have strong evidence (e.g. Cloudflare in front of Vercel), the
+  owner of the connected IP is reported as the outer layer and the conflict is shown.
+- Wrong CNAME mappings removed or corrected (Azure Traffic Manager, `googledomains.com`,
+  loose `kunlun*`/`alicloud*` wildcards; `wscdns.com` is Wangsu, not Alibaba).
+- TTFB is never estimated: if CDP timing lacks the request-sent or response-header
+  markers, TTFB is *Not Available* and the reason is recorded.
+- The report never shows HTTP 200 for a response that was not captured. Failed
+  navigations (DNS failure, refused connection, TLS error) end with a clear error
+  instead of analysing Chrome's error page.
 
-Unlike traditional extensions that rely solely on window-level timing or simple regexes on main document HTML, CDN Analyzer Pro runs an isolated headless tab via CDP to capture raw protocol events (`Network.requestWillBeSent`, `Network.responseReceived`, `Network.loadingFinished`, and `Security.visibleSecurityState`). This ensures every reported metric is directly traceable to observed wire evidence.
+**Coverage**
+- Provider fingerprints live in one registry: `modules/providers.js`.
+- CNAME chains are resolved for the document host **and every unique resource host**
+  (deduplicated, 6 concurrent lookups, 30-host cap, 3.5 s total budget, cancellable).
+- IP ranges for Cloudflare and Fastly are the providers' published lists (source and
+  retrieval date stored with the data) and matched with exact IPv4/IPv6 CIDR logic.
+  IP ownership is reported as low-confidence, *network-only* evidence.
+- Added: Amazon S3, Azure Blob, Google Cloud Storage, Alibaba OSS (as origin storage),
+  Fly.io, Render, Gcore, Wangsu/CDNetworks, RFC 9211 `Cache-Status`.
 
----
-
-## 2. Key Features
-
-- **Multi-Provider CDN Detection:**
-  - Evaluates independent signatures across 16+ major CDN providers (Cloudflare, Amazon CloudFront, Akamai, Fastly, Google Cloud CDN, Azure CDN, Vercel, Netlify, Bunny CDN, KeyCDN, EdgeNext, Imperva, etc.).
-  - Uses additive multi-factor scoring and confidence weighting (`high`, `medium`, `low`, `none`).
-  - Distinguishes primary origin CDN delivery from multi-CDN asset architectures.
-
-- **Edge-Server & PoP Identification:**
-  - Extracts physical edge server node IDs (e.g. `BOM78-P3`, `iad1-1`) from provider-specific headers (`x-amz-cf-pop`, `x-served-by`, `cf-ray`).
-  - Maps confirmed 3-letter IATA airport codes (e.g. `BOM` for Mumbai) to geographic locations.
-  - Decouples physical node IDs from geographic PoPs: never fabricates an airport location if only an internal node ID is observed.
-
-- **Accurate Network Timing & Connection Reuse:**
-  - Measures DNS resolution, TCP / QUIC transport, TLS handshake, Full TTFB, document download, DOMContentLoaded, load event, and network idle.
-  - Accurately detects socket reuse (`connection.reused`): labels reused connections as `Connection Reused (Bypassed)` rather than displaying misleading `0 ms` measurements.
-
-- **Dual-Layer Cache Analysis:**
-  - Clearly distinguishes **Browser Delivery Source** (network fetch, disk cache, memory cache, service worker, prefetch) from **CDN Edge Cache Status** (`HIT`, `MISS`, `BYPASS`, `REVALIDATED`).
-  - Analyzes Cache-Control policies (`max-age`, `s-maxage`, `public`, `private`, `no-store`) without misclassifying policy directives as edge cache hits.
-
-- **Resource Accounting & Host Breakdown:**
-  - Quantifies total requests, first-party vs third-party requests, failed requests, encoded network transfer bytes, and decoded payload bytes.
-  - Reports macro **CDN Delivery Ratio** (`X of Y requests (Z%) served via CDN`).
-  - Summarizes per-host request counts and detected CDN providers.
-  - Identifies top asset highlights (largest overall resource, image, script, stylesheet, slowest request).
-
-- **Dynamic Performance Scoring:**
-  - Computes a weighted 0–100 score and letter grade (A+ through F) evaluating page load speed (25%), TTFB (25%), edge cache efficiency (20%), compression (15%), and security headers (15%).
-  - Dynamically reweights unmeasured or inapplicable components without unfair score penalties.
-
-- **Structured 8-Section Audit Reports & Sanitized Exports:**
-  - Generates comprehensive Markdown audit reports covering all 8 diagnostic areas.
-  - Exports sanitized JSON with automated redaction of sensitive credentials, cookies, tokens, and authorization headers.
-  - One-click clipboard copy with transient visual feedback (`Copied!`).
-
-- **Reliability & Isolation:**
-  - Headless analysis tabs run in the background without affecting the user's active browsing tab.
-  - Complete state reset and teardown prevents cross-analysis data leakage.
-  - Safely recovers from Manifest V3 service worker sleep/wake suspension cycles.
+**Report accuracy**
+- Every cache-status header is kept (`cdnCache.layers`); multi-tier `X-Cache`
+  values use the tier closest to the visitor.
+- Cloudflare `DYNAMIC` and `BYPASS` are distinct. `no-store`, `no-cache` and `private`
+  are interpreted separately.
+- Per-host results count every provider seen on that host; the report separates the
+  provider of the HTML document from the providers of assets.
+- Score breakdown pills now show real component scores; missing measurements are shown
+  as N/A and listed under the score instead of being filled with a neutral value.
 
 ---
 
-## 3. Requirements
+## 2. Installation
 
-- **Google Chrome:** Version 120 or newer.
-- **Node.js (for regression tests):** Version 18.0 or newer (uses native ESM and Node built-in modules).
-- **Operating System:** Cross-platform (Windows, macOS, Linux).
+**From the release zip (recommended)**
+1. Unzip `cdn-analyzer-pro-v2.1.0.zip` to a folder.
+2. Open `chrome://extensions`, enable **Developer mode**.
+3. Click **Load unpacked** and choose the unzipped folder (the one with `manifest.json`).
 
----
+**Chrome Web Store:** upload `cdn-analyzer-pro-v2.1.0.zip` as-is in the Developer
+Dashboard. Use the permission justifications in section 4 and the privacy statement in
+section 5 for the store listing.
 
-## 4. Installation Instructions
-
-1. Clone or download this repository to your local machine:
-   ```bash
-   git clone https://github.com/2405101270161-bit/cdn-extension.git
-   cd cdn-extension
-   ```
-2. Open Google Chrome and enter `chrome://extensions/` in the address bar.
-3. In the upper-right corner of the Extensions page, switch the **Developer mode** toggle to **ON**.
-4. In the upper-left corner, click **Load unpacked**.
-5. Select the extension directory (the folder containing `manifest.json`).
-6. The **CDN Analyzer Pro** icon will appear in your Chrome toolbar. Pin it for quick access.
+**From source:** run `node scripts/package_release.mjs`, then load `dist/cdn-analyzer-pro/`.
 
 ---
 
-## 5. Usage Instructions
+## 3. Usage
 
-1. Click the **CDN Analyzer Pro** icon in your toolbar.
-2. The popup will automatically suggest the URL of the active tab, or you can enter any HTTP/HTTPS URL (e.g. `https://www.cloudflare.com`).
-3. Click **Analyze** (or press `Enter`).
-4. Watch the real-time checklist as the analyzer navigates, attaches CDP, inspects network streams, and aggregates data.
-5. Review the resulting dashboard:
-   - **Score Card:** View the overall score, grade, and component breakdown pills.
-   - **Quick Stats:** Primary CDN provider, SSL transport, cache state, and TTFB.
-   - **Accordions:** Expand Performance, Security, Headers, Cache, Resources, Suggestions, and Mini Waterfall for detailed diagnostic rows.
-6. **Copy Report:** Click the `Copy` button in the topbar or footer to copy the 8-section Markdown audit to your clipboard.
-7. **Export JSON:** Click the `JSON` button to download a sanitized JSON report.
-8. **Reset:** Click `Reset` in the topbar to immediately abort any running run and return to a clean home state.
+1. Click the toolbar icon. The active tab's URL is pre-filled; any http(s) URL works.
+2. Click **Analyze** (or press Enter). Analysis takes roughly 2–12 seconds.
+3. Read the dashboard: score card, quick stats (CDN, SSL, cache, TTFB) and the
+   Performance, Security, Headers, Cache, Resources, Suggestions and Waterfall sections.
+   The **Cache** section shows the detection method, every piece of evidence (with its
+   strength and whether it is product-specific), other layers, DNS CNAME chain and notes.
+4. **Reset** cancels a running analysis and clears the results.
 
----
+### Reading a CDN result
 
-## 6. Permissions and Security Rationale
-
-CDN Analyzer Pro strictly adheres to the principle of least privilege in Manifest V3:
-
-| Permission | Purpose & Justification |
+| Status | Meaning |
 | :--- | :--- |
-| `debugger` | Required to attach Chrome DevTools Protocol to the temporary background tab to collect raw HTTP request/response headers, low-level timing offsets, and TLS certificate security state. |
-| `tabs` | Required to create the hidden analysis tab (`chrome.tabs.create`), navigate it to the target URL, monitor lifecycle events, and safely terminate it (`chrome.tabs.remove`) on completion or exit. |
-| `storage` | Required for `chrome.storage.session` to track the state of in-flight analyses across service worker idle sleep and wake events. |
-| `activeTab` | Grants temporary read-only access to the currently active tab's URL so the popup can prefill the search field for user convenience. |
-| `host_permissions` (`http://*/*`, `https://*/*`) | Required by Chrome's `chrome.debugger.attach` API to allow CDP attachment to arbitrary user-entered target domains. |
-
-> **Note on Removed Permissions:**
-> The `scripting` permission and broad `content_scripts` were audited and removed because CDN Analyzer Pro operates entirely through CDP in background tabs, eliminating unnecessary code injection into user browsing pages.
+| *high confidence* | Product-specific header, or a header and a CNAME that agree |
+| *medium confidence* | Weaker provider-specific header, or a CNAME to a provider domain |
+| *low confidence • network only* | Only the connected IP is inside the provider's published range |
+| *Not Identified / No CDN signature found* | No evidence found. **Not** proof that no CDN is used |
 
 ---
 
-## 7. Privacy and Data Handling
+## 4. Permissions
 
-- **100% Local Execution:** All analysis occurs locally in memory and in transient session storage. No data is transmitted to external telemetry, analytics, or third-party servers.
-- **Sensitive Header Redaction:** Authorization headers (`Bearer ...`), cookie strings, API keys, and basic auth credentials in URLs are automatically stripped by `scrubSensitiveHeaders` before data is stored or exported.
-- **Zero Browser Mutation:** The extension never clears, modifies, or alters the user's personal browser cache, cookies, or existing history.
-- **Ephemeral Background Sessions:** Temporary analysis tabs are detached and destroyed immediately upon analysis completion or failure.
+| Permission | Why it is needed |
+| :--- | :--- |
+| `debugger` | Attach CDP to the temporary analysis tab to read response headers, timing and TLS details. Chrome shows a "started debugging this browser" bar while an analysis runs. |
+| `activeTab` | Pre-fill the popup with the current tab's URL. |
+| `storage` | Clear leftover state from older versions on install/startup. |
+| `host_permissions` `http://*/*`, `https://*/*` | Required to attach the debugger to user-entered sites and to make DNS-over-HTTPS lookups. |
+
+The `tabs` permission was removed in 2.1.0: creating, navigating and closing the
+analysis tab does not need it, and the URL pre-fill works through `activeTab`.
 
 ---
 
-## 8. Automated Testing
+## 5. Privacy
 
-The project includes a comprehensive, zero-dependency regression test suite covering all functionality from Goals 1 through 6.
+- Analysis runs locally. Results are kept in memory only and discarded on Reset or
+  when the popup is reopened. Nothing is sent to the developer.
+- **Third-party requests the extension makes:**
+  - **DNS-over-HTTPS** CNAME lookups for the analysed hostnames, sent to
+    `cloudflare-dns.com` (fallback `dns.google`).
+  - The site **favicon** shown in the report, loaded from `www.google.com/s2/favicons`.
+  - The analysed site itself, loaded in a background tab with your normal browser profile.
+- Authorization, cookie and API-key headers are removed before results are stored in memory.
 
-### Run All 9 Test Suites (135 Deterministic Tests)
+---
+
+## 6. Testing
 
 ```bash
-node tests/run_all_tests.mjs
+node tests/run_all_tests.mjs        # 11 suites, 167 deterministic tests, no dependencies
+node scripts/package_release.mjs    # builds dist/ and validates the package
 ```
 
-### Run Live Network Smoke Tests (5 Real-World Websites)
+`tests/test_evidence_accuracy.mjs` covers the 2.1.0 fixes: unknown ≠ origin, generic-header
+false positives, storage vs CDN, Google edge vs Cloud CDN, conflict handling, IPv6 CIDR
+matching, cache layers and directives, host aggregation, DNS batching/cancellation, TTFB
+availability and score completeness.
 
-```bash
-node tests/live_smoke_test.mjs
-```
+**Representative fixtures** in `tests/fixtures/provider_fixtures.mjs` follow each provider's
+documented header formats with sanitized values. They are not live captures.
 
-### Individual Test Suites
+**Adding verified fixtures:** open DevTools → Network on a site you have confirmed is served
+by a provider, copy the main document's response headers (remove cookies and tokens), and
+add an entry with the expected provider to `provider_fixtures.mjs`.
 
-- `node tests/test_cdn_detection.mjs`: Provider signatures, multi-match, malformed headers.
-- `node tests/test_edge_evidence.mjs`: Edge PoP extraction, socket IP separation.
-- `node tests/test_network_timing.mjs`: Timing calculations, socket reuse, protocol mapping.
-- `node tests/test_cache_analysis.mjs`: Browser cache, service worker, CDN HIT/MISS/BYPASS.
-- `node tests/test_lifecycle.mjs`: Stale state clearance, generation isolation.
-- `node tests/test_integration.mjs`: End-to-end synthetic CDP event processing.
-- `node tests/test_goal3_metrics.mjs`: Transfer accounting, public suffix parsing.
-- `node tests/test_reliability.mjs`: Error handling, debugger disconnects, timeouts, credential sanitization.
-- `node tests/test_report_ui.mjs`: 8-section report generation, unmeasured sentinels, secret exclusion.
+**Real-Chrome verification (2.1.0):** the packaged extension was loaded into Chrome 153 and
+run against a local server returning Cloudflare, CloudFront, Fastly and plain-nginx
+responses, plus a failed DNS lookup and a refused port. Detection, cache status, PoP,
+CDP timing, error handling and popup rendering behaved as expected. Live third-party
+sites were not tested in that environment; compare a few against DevTools before publishing.
 
 ---
 
-## 9. Known Limitations
+## 7. Known limitations
 
-1. **Manifest V3 Service Worker Lifetime:** Chrome terminates background service workers after ~30 seconds of inactivity. In-flight analyses maintain an active tab lock to prevent early suspension; if suspended by Chrome, the extension safely recovers and marks the run failed with clear retry instructions.
-2. **Third-Party Iframe Timing Restrictions:** Under the W3C Resource Timing specification, cross-origin iframes without the `Timing-Allow-Origin` header omit granular TCP/TLS breakdown timings. The extension handles this honestly by displaying `Not Available` rather than misleading `0 ms` values.
-3. **Encrypted Client Hello (ECH):** Sites negotiating ECH encrypt the outer Server Name Indication (SNI) on the wire. The extension validates certificates via CDP's `Security.visibleSecurityState` API.
+- Some CDNs hide or remove identifying headers.
+- CNAMEs can be invisible (DNS flattening, direct A/AAAA records, custom hostnames).
+- A provider's IP range shows network ownership, not a specific CDN product.
+- HTTP/3 (QUIC) is a transport protocol and does not prove CDN usage.
+- The HTML, images, scripts, fonts and APIs can each use a different provider.
+- Cross-origin timing restrictions and missing CDP timing fields can make DNS/TCP/TLS/TTFB
+  unavailable; they are reported as *Not Available*, never estimated.
+- Capture stops 8 s after navigation starts, or about 1 s after the load event; very late
+  requests may be missing (the report warns when capture ended early).
+- Google Cloud CDN cannot be confirmed from response headers; Google-hosted responses are
+  reported as Google Front End.
 
 ---
 
-## 10. License
+## 8. License
 
-MIT License. See source files for details.
+MIT License.

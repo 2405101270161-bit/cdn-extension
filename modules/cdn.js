@@ -1,27 +1,15 @@
-/**
- * CDN Analyzer Pro v2 - CDN Detection & Cache Module
- * Robust signature rules for 16+ CDN providers & full HTTP Cache Status extraction.
- *
- * FIXES APPLIED:
- *  BUG-14: Replaced the mutually-exclusive if/else chain with additive per-provider
- *          scoring. Every provider is evaluated independently; all matches are
- *          collected, sorted by confidence, and the highest-confidence match becomes
- *          the primary `provider`. Additional matches populate `possibleLayers`.
- *  BUG-15: Narrowed the Fastly x-served-by fingerprint — "cache-*" alone is too broad
- *          and matches generic Varnish caches. Now requires at least one additional
- *          Fastly signal (x-fastly-request-id or "fastly" in Via).
- *  BUG-16: Removed `gws` and `ghs` from Google CDN detection. Those are Google's
- *          own origin servers, not Google Cloud CDN edge nodes. Only x-goog-* headers
- *          and an explicit "google" Via value are accepted.
- *  BUG-17: Removed the false "HIT" mapping for Cache-Control: max-age/s-maxage/public.
- *          Those directives declare cacheability policy — they do NOT indicate the
- *          CDN served the response from cache. Now mapped to "Cacheable" (browser/CDN
- *          may cache) or "Not Cacheable". "HIT"/"MISS" are reserved for real CDN status
- *          headers (cf-cache-status, x-cache, etc.).
- */
+import {
+    HEADER_SIGNATURES,
+    CNAME_SIGNATURES,
+    IP_RANGE_SOURCES,
+    CATEGORY_PRIORITY,
+    KNOWN_LIMITATIONS
+} from './providers.js';
 
-// Confidence numeric weights for sorting
 export const CONF_WEIGHT = { high: 3, medium: 2, low: 1, none: 0 };
+const STRENGTH_SCORE = { high: 3, medium: 2, low: 1 };
+
+export const NOT_DETECTED = 'Not Detected';
 
 const SENSITIVE_HEADER_KEYS = new Set([
     'authorization',
@@ -32,10 +20,6 @@ const SENSITIVE_HEADER_KEYS = new Set([
     'x-api-key'
 ]);
 
-/**
- * Normalizes header keys to lowercase and cleanly handles duplicate,
- * array-formatted, or malformed header values.
- */
 export function normalizeHeaders(rawHeaders = {}) {
     if (!rawHeaders || typeof rawHeaders !== 'object') return {};
     const normalized = {};
@@ -62,13 +46,9 @@ export function normalizeHeaders(rawHeaders = {}) {
     return normalized;
 }
 
-/**
- * Strips sensitive authorization and cookie headers from responses before
- * exporting or persisting analysis objects.
- */
 export function scrubSensitiveHeaders(rawHeaders = {}) {
     const clean = {};
-    for (const [k, v] of Object.entries(rawHeaders)) {
+    for (const [k, v] of Object.entries(rawHeaders || {})) {
         if (!SENSITIVE_HEADER_KEYS.has(String(k).trim().toLowerCase())) {
             clean[k] = v;
         }
@@ -76,362 +56,582 @@ export function scrubSensitiveHeaders(rawHeaders = {}) {
     return clean;
 }
 
-/**
- * Evaluates a single CDN provider's signal set against the supplied headers.
- * Returns { provider, confidence, evidence } if matched, or null.
- */
-function testProvider(name, highSignals, mediumSignals, headers, server, via, xPoweredBy) {
+function shorten(value, max = 48) {
+    const s = String(value ?? '');
+    return s.length > max ? `${s.slice(0, max)}…` : s;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * Evidence collection
+ * Every evidence item is explainable:
+ *   { provider, category, source, key, matchedValue, strength,
+ *     productSpecific, hostname, note }
+ * ────────────────────────────────────────────────────────────────────────── */
+
+export function collectHeaderEvidence(rawHeaders = {}, hostname = null) {
+    const headers = normalizeHeaders(rawHeaders);
     const evidence = [];
-    let confidence = 'none';
-
-    for (const { key, test, label } of highSignals) {
-        const val = headers[key];
-        const hasVal = val !== undefined && val !== null && String(val).trim().length > 0;
-        if (hasVal && (test === undefined || test(val, { server, via, xPoweredBy }))) {
-            evidence.push(label ? label(val) : `${key}: ${String(val).slice(0, 32)}`);
-            confidence = 'high';
-        }
+    for (const sig of HEADER_SIGNATURES) {
+        const value = headers[sig.header];
+        if (value === undefined || value === null) continue;
+        const str = String(value).trim();
+        if (!str) continue;
+        if (sig.match && !sig.match.test(str)) continue;
+        evidence.push({
+            provider: sig.provider,
+            category: sig.category,
+            source: 'response-header',
+            key: sig.header,
+            matchedValue: shorten(str),
+            strength: sig.strength,
+            productSpecific: Boolean(sig.productSpecific),
+            hostname,
+            note: sig.note || null
+        });
     }
+    return evidence;
+}
 
-    if (confidence !== 'high') {
-        for (const { test, label } of mediumSignals) {
-            if (test({ server, via, xPoweredBy })) {
-                evidence.push(label);
-                confidence = 'medium';
+export const CDN_CNAME_PATTERNS = CNAME_SIGNATURES;
+
+export function collectCnameEvidence(cnames = [], hostname = null) {
+    if (!Array.isArray(cnames)) return [];
+    const evidence = [];
+    const seen = new Set();
+    for (const cname of cnames) {
+        if (!cname || typeof cname !== 'string') continue;
+        const normalized = cname.trim().toLowerCase().replace(/\.$/, '');
+        for (const sig of CNAME_SIGNATURES) {
+            if (sig.pattern.test(normalized) && !seen.has(sig.provider)) {
+                seen.add(sig.provider);
+                evidence.push({
+                    provider: sig.provider,
+                    category: sig.category,
+                    source: 'dns-cname',
+                    key: 'CNAME',
+                    matchedValue: normalized,
+                    strength: 'medium',
+                    productSpecific: true,
+                    hostname,
+                    note: 'Hostname is a DNS alias of a provider-controlled domain'
+                });
             }
         }
     }
-
-    if (confidence === 'none') return null;
-    return { provider: name, confidence, evidence };
+    return evidence;
 }
 
-export function detectCdnProvider(rawHeaders = {}) {
-    const headers = normalizeHeaders(rawHeaders);
-    const server = (headers['server'] || '').toLowerCase();
-    const via = (headers['via'] || '').toLowerCase();
-    const xPoweredBy = (headers['x-powered-by'] || '').toLowerCase();
-
-    // ------------------------------------------------------------------ //
-    // BUG-14 FIX: Define each provider independently. All are evaluated.  //
-    // ------------------------------------------------------------------ //
-    const providerDefs = [
-
-        // 1. Cloudflare R2
-        {
-            name: 'Cloudflare R2',
-            high: [
-                { key: 'x-amz-meta-cf-r2-structure' },
-                { key: 'cf-r2-request-id' },
-            ],
-            medium: [
-                { test: ({ server: s }) => s.includes('cloudflare-r2'), label: 'server: cloudflare-r2' }
-            ]
-        },
-
-        // 2. Cloudflare
-        {
-            name: 'Cloudflare',
-            high: [
-                { key: 'cf-ray', label: (v) => `cf-ray: ${v}` },
-                { key: 'cf-cache-status', label: (v) => `cf-cache-status: ${v}` },
-            ],
-            medium: [
-                { test: ({ server: s }) => s.includes('cloudflare') && !s.includes('cloudflare-r2'), label: 'server: cloudflare' }
-            ]
-        },
-
-        // 3. Amazon CloudFront
-        {
-            name: 'Amazon CloudFront',
-            high: [
-                { key: 'x-amz-cf-id', label: (v) => `x-amz-cf-id: ${v.slice(0, 16)}...` },
-                { key: 'x-amz-cf-pop', label: (v) => `x-amz-cf-pop: ${v}` },
-            ],
-            medium: [
-                { test: ({ via: v, server: s }) => v.includes('cloudfront') || s.includes('cloudfront'), label: 'via/server: cloudfront' }
-            ]
-        },
-
-        // 4. Fastly — BUG-15 FIX: x-served-by "cache-*" alone is too broad;
-        //    require at least one additional Fastly-specific signal.
-        {
-            name: 'Fastly',
-            high: [
-                { key: 'x-fastly-request-id', label: (v) => `x-fastly-request-id: ${v.slice(0, 16)}` },
-                { key: 'fastly-restarts' },
-                {
-                    key: 'x-served-by',
-                    // BUG-15 FIX: Only treat x-served-by as high-confidence Fastly when
-                    // another Fastly signal (via or x-fastly-request-id) also exists.
-                    test: (val, { via: v }) =>
-                        val.toLowerCase().includes('cache-') &&
-                        (v.includes('fastly') || v.includes('varnish') || !!headers['x-fastly-request-id']),
-                    label: (v) => `x-served-by: ${v.slice(0, 24)}`
-                },
-            ],
-            medium: [
-                { test: ({ via: v, server: s }) => v.includes('fastly') || s.includes('fastly'), label: 'via/server: fastly' }
-            ]
-        },
-
-        // 5. Akamai
-        {
-            name: 'Akamai',
-            high: [
-                { key: 'x-akamai-transformed' },
-                { key: 'x-cache-remote' },
-                { key: 'akamai-grn', label: (v) => `akamai-grn: ${v}` },
-                { key: 'x-akamai-request-id' },
-                { key: 'x-check-cacheable' },
-            ],
-            medium: [
-                { test: ({ server: s }) => s.includes('akamai') || s.includes('akamaighost') || s.includes('akamainetwork'), label: 'server: akamai' }
-            ]
-        },
-
-        // 6. Azure CDN / Front Door
-        {
-            name: 'Azure CDN',
-            high: [
-                { key: 'x-azure-ref', label: () => 'x-azure-ref present' },
-                { key: 'x-fd-int-ro-stat' },
-                { key: 'x-ms-ref' },
-                { key: 'x-msedge-ref' },
-            ],
-            medium: [
-                { test: ({ server: s, via: v }) => s.includes('azure') || v.includes('azure'), label: 'server/via: azure' }
-            ]
-        },
-
-        // 7. Google Cloud CDN — BUG-16 FIX: Removed gws/ghs (origin servers).
-        {
-            name: 'Google Cloud CDN',
-            high: [
-                { key: 'x-goog-generation' },
-                { key: 'x-goog-metageneration' },
-                { key: 'x-goog-stored-content-encoding' },
-            ],
-            medium: [
-                // Only match "google" in Via (explicit CDN routing), not the server header.
-                // google.com uses "gws" as its origin server which is NOT a CDN.
-                { test: ({ via: v }) => v.includes('google'), label: 'via: google' }
-            ]
-        },
-
-        // 8. BunnyCDN
-        {
-            name: 'BunnyCDN',
-            high: [
-                { key: 'b-cache' },
-                { key: 'b-ray' },
-                { key: 'cdn-cache', label: (v) => `cdn-cache: ${v}` },
-            ],
-            medium: [
-                { test: ({ server: s }) => s.includes('bunnycdn'), label: 'server: bunnycdn' }
-            ]
-        },
-
-        // 9. KeyCDN
-        {
-            name: 'KeyCDN',
-            high: [
-                { key: 'x-edge-location' },
-                { key: 'x-keycdn-req' },
-                { key: 'x-keycdn-cache' },
-            ],
-            medium: [
-                { test: ({ server: s }) => s.includes('keycdn'), label: 'server: keycdn' }
-            ]
-        },
-
-        // 10. Vercel
-        {
-            name: 'Vercel',
-            high: [
-                { key: 'x-vercel-id', label: (v) => `x-vercel-id: ${v}` },
-                { key: 'x-vercel-cache', label: (v) => `x-vercel-cache: ${v}` },
-            ],
-            medium: [
-                { test: ({ server: s, xPoweredBy: x }) => s.includes('vercel') || x.includes('vercel'), label: 'server/x-powered-by: vercel' }
-            ]
-        },
-
-        // 11. Netlify
-        {
-            name: 'Netlify',
-            high: [
-                { key: 'x-nf-request-id' },
-                { key: 'x-nf-cache-status', label: (v) => `x-nf-cache-status: ${v}` },
-            ],
-            medium: [
-                { test: ({ server: s, xPoweredBy: x }) => s.includes('netlify') || x.includes('netlify'), label: 'server: netlify' }
-            ]
-        },
-
-        // 12. Imperva / Incapsula
-        {
-            name: 'Imperva',
-            high: [
-                { key: 'x-iinfo' },
-                { key: 'x-cdn', test: (v) => v.toLowerCase().includes('imperva'), label: () => 'x-cdn: imperva' },
-            ],
-            medium: [
-                { test: ({ server: s }) => s.includes('incapsula') || s.includes('imperva'), label: 'server: incapsula' }
-            ]
-        },
-
-        // 13. Sucuri
-        {
-            name: 'Sucuri',
-            high: [
-                { key: 'x-sucuri-id' },
-                { key: 'x-sucuri-cache', label: (v) => `x-sucuri-cache: ${v}` },
-            ],
-            medium: [
-                { test: ({ server: s }) => s.includes('sucuri'), label: 'server: sucuri' }
-            ]
-        },
-
-        // 14. CDN77
-        {
-            name: 'CDN77',
-            high: [
-                { key: 'x-77-pop' },
-                { key: 'x-77-cache' },
-            ],
-            medium: [
-                { test: ({ server: s }) => s.includes('cdn77'), label: 'server: cdn77' }
-            ]
-        },
-
-        // 15. Alibaba CDN
-        {
-            name: 'Alibaba CDN',
-            high: [
-                { key: 'x-swift-savetime' },
-                { key: 'x-swift-cachetime' },
-                { key: 'x-oss-request-id' },
-            ],
-            medium: [
-                { test: ({ server: s }) => s.includes('alibabacloud') || s.includes('alysa'), label: 'server: alibaba' }
-            ]
-        },
-
-        // 16. StackPath
-        {
-            name: 'StackPath',
-            high: [
-                { key: 'x-sp-url' },
-                { key: 'x-sp-wave' },
-            ],
-            medium: []
-        },
-
-        // 17. Edgio / Layer0
-        {
-            name: 'Edgio / Layer0',
-            high: [
-                { key: 'x-edg-c-info' },
-                { key: 'x-l0-c-info' },
-            ],
-            medium: []
-        },
-
-        // 18. GitHub Pages
-        {
-            name: 'GitHub Pages',
-            high: [
-                { key: 'x-github-request-id' },
-            ],
-            medium: [
-                { test: ({ server: s }) => s.includes('github.com') || s.includes('githubusercontent'), label: 'server: github' }
-            ]
-        },
-
-        // 19. Shopify
-        {
-            name: 'Shopify CDN',
-            high: [
-                { key: 'x-shopid' },
-                { key: 'x-shardid' },
-            ],
-            medium: [
-                { test: ({ server: s }) => s.includes('shopify'), label: 'server: shopify' }
-            ]
-        },
-    ];
-
-    // ------------------------------------------------------------------ //
-    // BUG-14 FIX: Evaluate every provider independently, collect matches. //
-    // ------------------------------------------------------------------ //
-    const matches = [];
-
-    for (const def of providerDefs) {
-        const result = testProvider(
-            def.name,
-            def.high,
-            def.medium,
-            headers,
-            server,
-            via,
-            xPoweredBy
-        );
-        if (result) {
-            matches.push(result);
-        }
-    }
-
-    // Sort by confidence weight descending
-    matches.sort((a, b) => (CONF_WEIGHT[b.confidence] || 0) - (CONF_WEIGHT[a.confidence] || 0));
-
-    let provider = 'Not Detected';
-    let confidence = 'none';
-    let evidence = [];
-    const possibleLayers = [];
-
-    if (matches.length > 0) {
-        const primary = matches[0];
-        provider = primary.provider;
-        confidence = primary.confidence;
-        evidence = primary.evidence;
-
-        // Populate layered CDN information
-        for (let i = 1; i < matches.length; i++) {
-            possibleLayers.push({
-                provider: matches[i].provider,
-                confidence: matches[i].confidence,
-                evidence: matches[i].evidence
-            });
-        }
-    }
-
-    console.log("[CDN Debug] server =", server, "| via =", via);
-    console.log("[CDN Debug] All matches:", matches.map(m => `${m.provider}(${m.confidence})`).join(', ') || 'none');
-    console.log("[CDN Debug] Primary:", provider, "(", confidence, ")");
-
+export function detectCdnFromCname(cnames = []) {
+    const ev = collectCnameEvidence(cnames)[0];
+    if (!ev) return null;
     return {
-        provider,
-        confidence,
-        evidence,
-        possibleLayers
+        provider: ev.provider,
+        cname: ev.matchedValue,
+        confidence: 'medium',
+        evidence: `dns-cname: ${ev.matchedValue} -> ${ev.provider}`
     };
 }
 
+/* ── IP parsing (IPv4 + IPv6, proper CIDR matching) ───────────────────────── */
+
+function parseIpv4(ip) {
+    const parts = ip.split('.');
+    if (parts.length !== 4) return null;
+    let value = 0n;
+    for (const p of parts) {
+        if (!/^\d{1,3}$/.test(p)) return null;
+        const n = Number(p);
+        if (n > 255) return null;
+        value = (value << 8n) | BigInt(n);
+    }
+    return value;
+}
+
+function parseIpv6(ip) {
+    let addr = ip.toLowerCase();
+    const zone = addr.indexOf('%');
+    if (zone !== -1) addr = addr.slice(0, zone);
+
+    // Embedded IPv4 (e.g. ::ffff:1.2.3.4)
+    const lastColon = addr.lastIndexOf(':');
+    if (addr.includes('.') && lastColon !== -1) {
+        const v4 = parseIpv4(addr.slice(lastColon + 1));
+        if (v4 === null) return null;
+        const hi = Number((v4 >> 16n) & 0xffffn).toString(16);
+        const lo = Number(v4 & 0xffffn).toString(16);
+        addr = `${addr.slice(0, lastColon + 1)}${hi}:${lo}`;
+    }
+
+    const halves = addr.split('::');
+    if (halves.length > 2) return null;
+    const head = halves[0] ? halves[0].split(':') : [];
+    const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+    let groups;
+    if (halves.length === 2) {
+        const fill = 8 - head.length - tail.length;
+        if (fill < 0) return null;
+        groups = [...head, ...Array(fill).fill('0'), ...tail];
+    } else {
+        groups = head;
+    }
+    if (groups.length !== 8) return null;
+    let value = 0n;
+    for (const g of groups) {
+        if (!/^[0-9a-f]{1,4}$/.test(g)) return null;
+        value = (value << 16n) | BigInt(parseInt(g, 16));
+    }
+    return value;
+}
+
+export function parseIp(raw) {
+    if (!raw || typeof raw !== 'string') return null;
+    const ip = raw.trim().replace(/^\[|\]$/g, '');
+    if (ip.includes(':')) {
+        const v = parseIpv6(ip);
+        return v === null ? null : { version: 6, value: v, text: ip.toLowerCase() };
+    }
+    const v = parseIpv4(ip);
+    return v === null ? null : { version: 4, value: v, text: ip };
+}
+
+export function ipInCidr(parsedIp, cidr) {
+    const slash = cidr.indexOf('/');
+    if (slash === -1 || !parsedIp) return false;
+    const base = parseIp(cidr.slice(0, slash));
+    const bits = parseInt(cidr.slice(slash + 1), 10);
+    if (!base || base.version !== parsedIp.version || !Number.isInteger(bits)) return false;
+    const width = parsedIp.version === 4 ? 32 : 128;
+    if (bits < 0 || bits > width) return false;
+    if (bits === 0) return true;
+    const shift = BigInt(width - bits);
+    return (parsedIp.value >> shift) === (base.value >> shift);
+}
+
+export const CDN_IP_RANGES = IP_RANGE_SOURCES;
+
+export function collectIpEvidence(remoteIp, hostname = null) {
+    const parsed = parseIp(remoteIp);
+    if (!parsed) return [];
+    for (const src of IP_RANGE_SOURCES) {
+        const list = parsed.version === 4 ? src.ipv4 : src.ipv6;
+        for (const cidr of (list || [])) {
+            if (ipInCidr(parsed, cidr)) {
+                return [{
+                    provider: src.provider,
+                    category: src.category,
+                    source: 'ip-range',
+                    key: 'remote-ip',
+                    matchedValue: `${parsed.text} in ${cidr}`,
+                    strength: 'low',
+                    productSpecific: false,
+                    hostname,
+                    note: `Network ownership only (published range, ${src.source}, retrieved ${src.retrieved})`
+                }];
+            }
+        }
+    }
+    return [];
+}
+
+export function detectCdnFromIp(remoteIp) {
+    const ev = collectIpEvidence(remoteIp)[0];
+    if (!ev) return null;
+    return {
+        provider: ev.provider,
+        ip: parseIp(remoteIp).text,
+        confidence: 'low',
+        evidence: `remote-ip: ${ev.matchedValue} (${ev.provider} published range)`
+    };
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * Evidence aggregation and conflict handling
+ * ────────────────────────────────────────────────────────────────────────── */
+
+export function formatEvidence(ev) {
+    const sourceLabel = ev.source === 'response-header' ? '' : ev.source === 'dns-cname' ? 'dns-cname: ' : 'remote-ip: ';
+    const value = ev.source === 'response-header' ? `${ev.key}: ${ev.matchedValue}` : ev.matchedValue;
+    const scope = ev.productSpecific ? 'product-specific' : 'network/edge ownership only';
+    return `${sourceLabel}${value} (${ev.strength}, ${scope})`;
+}
+
+function summarizeProvider(provider, items) {
+    const sources = new Set(items.map(e => e.source));
+    const hasProductSpecific = items.some(e => e.productSpecific);
+    const hasHighProduct = items.some(e => e.strength === 'high' && e.productSpecific);
+    const hasMediumOrHigh = items.some(e => e.strength === 'high' || e.strength === 'medium');
+    const onlyGenericLow = items.every(e => e.source === 'response-header' && e.strength === 'low' && !e.productSpecific);
+
+    let confidence = 'low';
+    if (hasHighProduct) confidence = 'high';
+    else if (hasMediumOrHigh) confidence = 'medium';
+
+    // Independent sources (e.g. header + CNAME) corroborate each other.
+    if (confidence === 'medium' && hasProductSpecific &&
+        sources.has('dns-cname') && sources.has('response-header')) {
+        confidence = 'high';
+    }
+
+    const score = items.reduce((s, e) => s + (STRENGTH_SCORE[e.strength] || 0), 0);
+    const category = items.reduce((best, e) =>
+        (CATEGORY_PRIORITY[e.category] || 0) > (CATEGORY_PRIORITY[best] || 0) ? e.category : best,
+        items[0].category);
+
+    return {
+        provider,
+        category,
+        confidence,
+        score,
+        productSpecific: hasProductSpecific,
+        supportingOnly: onlyGenericLow,
+        sources: Array.from(sources),
+        evidenceDetails: items,
+        evidence: items.map(formatEvidence)
+    };
+}
+
+const METHOD_BY_SOURCE = {
+    'response-header': 'response-header-inspection',
+    'dns-cname': 'dns-cname-inspection',
+    'ip-range': 'ip-range-fallback'
+};
+
 /**
- * Decomposes cache evidence into distinct, explicit categories:
- *  A. Browser HTTP cache (memory, disk, prefetch from CDP)
- *  B. Service-worker responses
- *  C. CDN or intermediary edge cache status (cf-cache-status, x-cache, etc.)
- *  D. Cache policy (Cache-Control, Age, Expires)
- *  E. Summary status for backwards compatibility
- *
- * Never infers a CDN cache HIT from Age or Cache-Control max-age/public.
+ * Combine evidence from every source into one transparent verdict.
+ *  - Generic low-strength header hints never create a detection on their own.
+ *  - Storage/origin providers never outrank a delivery provider.
+ *  - When two delivery providers both have high-confidence evidence, the one that owns
+ *    the connected IP is the outer layer; otherwise CDN > security > edge > hosting.
+ *    The conflict is always reported.
  */
+export function aggregateEvidence(allEvidence = [], options = {}) {
+    const byProvider = new Map();
+    for (const ev of allEvidence) {
+        if (!byProvider.has(ev.provider)) byProvider.set(ev.provider, []);
+        byProvider.get(ev.provider).push(ev);
+    }
+
+    const candidates = [];
+    for (const [provider, items] of byProvider.entries()) {
+        const summary = summarizeProvider(provider, items);
+        if (summary.supportingOnly) continue;
+        candidates.push(summary);
+    }
+
+    const ipOwner = allEvidence.find(e => e.source === 'ip-range')?.provider || null;
+
+    const rank = (c) => [
+        c.category === 'storage' ? 0 : 1,
+        CONF_WEIGHT[c.confidence] || 0,
+        c.provider === ipOwner ? 1 : 0,
+        CATEGORY_PRIORITY[c.category] || 0,
+        c.score
+    ];
+    candidates.sort((a, b) => {
+        const ra = rank(a);
+        const rb = rank(b);
+        for (let i = 0; i < ra.length; i++) {
+            if (ra[i] !== rb[i]) return rb[i] - ra[i];
+        }
+        return 0;
+    });
+
+    const notes = [];
+    if (candidates.length === 0) {
+        return {
+            provider: NOT_DETECTED,
+            status: 'unidentified',
+            category: null,
+            confidence: 'none',
+            evidence: [],
+            evidenceDetails: [],
+            allEvidence,
+            possibleLayers: [],
+            detectionMethod: 'none',
+            conflict: false,
+            notes: ['No provider-specific CDN signature was found. This does not prove the content is served directly from origin.'],
+            limitations: KNOWN_LIMITATIONS.slice()
+        };
+    }
+
+    const primary = candidates[0];
+    const others = candidates.slice(1);
+    const conflicting = others.filter(c => c.category !== 'storage' && c.confidence === 'high' && primary.confidence === 'high');
+    if (conflicting.length > 0) {
+        notes.push(`Multiple delivery providers have high-confidence evidence (${[primary.provider, ...conflicting.map(c => c.provider)].join(', ')}). ` +
+            (primary.provider === ipOwner
+                ? `${primary.provider} owns the connected IP, so it is reported as the outer layer.`
+                : `${primary.provider} is reported as the outer layer by category priority; the exact layering cannot be confirmed.`));
+    }
+    if (primary.provider === 'Google Front End') {
+        notes.push('Google Front End evidence shows Google edge infrastructure. It does not confirm the Google Cloud CDN product.');
+    }
+    if (!primary.productSpecific) {
+        notes.push(`Evidence for ${primary.provider} shows network/edge ownership only, not a specific CDN product.`);
+    }
+
+    const bestSource = ['response-header', 'dns-cname', 'ip-range'].find(s => primary.sources.includes(s));
+
+    return {
+        provider: primary.provider,
+        status: primary.productSpecific ? 'identified' : 'network-only',
+        category: primary.category,
+        confidence: primary.confidence,
+        evidence: primary.evidence,
+        evidenceDetails: primary.evidenceDetails,
+        allEvidence,
+        possibleLayers: others.map(c => ({
+            provider: c.provider,
+            category: c.category,
+            role: c.category === 'storage' ? 'origin-storage' : 'additional-layer',
+            confidence: c.confidence,
+            evidence: c.evidence,
+            evidenceDetails: c.evidenceDetails
+        })),
+        detectionMethod: METHOD_BY_SOURCE[bestSource] || 'none',
+        conflict: conflicting.length > 0,
+        notes,
+        limitations: []
+    };
+}
+
+export function detectCdnProvider(rawHeaders = {}, options = {}) {
+    const hostname = options.hostname || options.dnsInfo?.hostname || null;
+    const cnames = options.cnames || (options.dnsInfo && options.dnsInfo.cnames) || [];
+    const evidence = [
+        ...collectHeaderEvidence(rawHeaders, hostname),
+        ...collectCnameEvidence(cnames, hostname),
+        ...collectIpEvidence(options.remoteIp, hostname)
+    ];
+    const result = aggregateEvidence(evidence, options);
+    result.dnsInfo = options.dnsInfo || null;
+    return result;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * DNS-over-HTTPS CNAME resolution
+ * ────────────────────────────────────────────────────────────────────────── */
+
+const DOH_ENDPOINTS = [
+    (host) => `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(host)}&type=A`,
+    (host) => `https://dns.google/resolve?name=${encodeURIComponent(host)}&type=A`
+];
+
+export function isResolvableHostname(hostname) {
+    if (!hostname || typeof hostname !== 'string') return false;
+    const h = hostname.trim().toLowerCase().replace(/\.$/, '');
+    if (!h || h.length > 253 || !h.includes('.')) return false;
+    if (!/^[a-z0-9.-]+$/.test(h)) return false;
+    if (/^\d+\.\d+\.\d+\.\d+$/.test(h)) return false;
+    if (/\.(?:local|localhost|internal|test|invalid|example)$/.test(h)) return false;
+    return true;
+}
+
+/**
+ * Resolve the CNAME chain for one hostname. An A query is used because resolvers
+ * return the full alias chain in the answer section. Timers are always cleared.
+ */
+export async function resolveDnsCname(hostname, opts = {}) {
+    if (!isResolvableHostname(hostname)) return null;
+    const cleanHost = hostname.trim().toLowerCase().replace(/\.$/, '');
+    const timeoutMs = opts.timeoutMs || 2000;
+    const fetchImpl = opts.fetch || (typeof fetch === 'function' ? fetch : null);
+    if (!fetchImpl) return null;
+
+    for (const endpoint of DOH_ENDPOINTS) {
+        if (opts.signal?.aborted) return null;
+        const controller = new AbortController();
+        const onOuterAbort = () => controller.abort();
+        if (opts.signal) opts.signal.addEventListener('abort', onOuterAbort, { once: true });
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+            const res = await fetchImpl(endpoint(cleanHost), {
+                headers: { accept: 'application/dns-json' },
+                signal: controller.signal
+            });
+            if (!res || !res.ok) continue;
+            const data = await res.json();
+            const answers = Array.isArray(data?.Answer) ? data.Answer : [];
+            const cnames = answers
+                .filter(rec => rec && rec.type === 5 && rec.data)
+                .map(rec => String(rec.data).trim().toLowerCase().replace(/\.$/, ''));
+            return {
+                hostname: cleanHost,
+                cnames,
+                primaryCname: cnames[0] || null,
+                resolver: new URL(endpoint(cleanHost)).hostname
+            };
+        } catch (e) {
+            // try the next resolver
+        } finally {
+            clearTimeout(timer);
+            if (opts.signal) opts.signal.removeEventListener('abort', onOuterAbort);
+        }
+    }
+    return null;
+}
+
+/**
+ * Resolve many hostnames with deduplication, a concurrency limit, a host cap,
+ * an overall time budget and cancellation.
+ */
+export async function resolveHostCnames(hostnames = [], opts = {}) {
+    const {
+        concurrency = 6,
+        maxHosts = 30,
+        budgetMs = 3500,
+        timeoutMs = 2000,
+        signal = null,
+        fetch: fetchImpl
+    } = opts;
+
+    const unique = Array.from(new Set(
+        (hostnames || [])
+            .filter(Boolean)
+            .map(h => String(h).trim().toLowerCase().replace(/\.$/, ''))
+            .filter(isResolvableHostname)
+    ));
+    const queue = unique.slice(0, maxHosts);
+    const skipped = unique.slice(maxHosts);
+    const results = new Map();
+
+    const budgetController = new AbortController();
+    const onOuterAbort = () => budgetController.abort();
+    if (signal) {
+        if (signal.aborted) budgetController.abort();
+        else signal.addEventListener('abort', onOuterAbort, { once: true });
+    }
+    const budgetTimer = setTimeout(() => budgetController.abort(), budgetMs);
+
+    try {
+        let index = 0;
+        const worker = async () => {
+            while (index < queue.length && !budgetController.signal.aborted) {
+                const host = queue[index++];
+                const info = await resolveDnsCname(host, {
+                    timeoutMs,
+                    signal: budgetController.signal,
+                    fetch: fetchImpl
+                });
+                if (info) results.set(host, info);
+            }
+        };
+        const workers = Array.from({ length: Math.min(concurrency, queue.length) }, worker);
+        await Promise.all(workers);
+    } finally {
+        clearTimeout(budgetTimer);
+        if (signal) signal.removeEventListener('abort', onOuterAbort);
+    }
+
+    const unresolved = queue.filter(h => !results.has(h));
+    return {
+        results,
+        attempted: queue.length,
+        resolved: results.size,
+        unresolved,
+        skipped,
+        timedOut: budgetController.signal.aborted && !(signal && signal.aborted),
+        cancelled: Boolean(signal && signal.aborted)
+    };
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * Cache analysis
+ * ────────────────────────────────────────────────────────────────────────── */
+
+const CACHE_STATUS_HEADERS = [
+    'cf-cache-status',
+    'x-vercel-cache',
+    'x-nf-cache-status',
+    'akamai-cache-status',
+    'x-akamai-cache-status',
+    'x-sucuri-cache',
+    'x-77-cache',
+    'cdn-cache',
+    'x-cache',
+    'x-cache-remote',
+    'x-cache-hits',
+    'x-proxy-cache',
+    'cache-status'
+];
+
+function classifyCacheToken(token) {
+    const v = String(token || '').trim().toUpperCase();
+    if (!v) return 'UNKNOWN';
+    if (v.includes('DYNAMIC')) return 'DYNAMIC';
+    if (v.includes('BYPASS')) return 'BYPASS';
+    if (v.includes('REFRESH') || v.includes('REVALIDATED')) return 'REVALIDATED';
+    if (v.includes('EXPIRED')) return 'EXPIRED';
+    if (v.includes('STALE') || v.includes('UPDATING')) return 'STALE';
+    if (v.includes('HIT')) return 'HIT';
+    if (v.includes('MISS')) return 'MISS';
+    return 'UNKNOWN';
+}
+
+/** RFC 9211 Cache-Status: `"Netlify Edge"; hit, Origin; fwd=miss` → closest-to-client is last. */
+function classifyRfc9211(value) {
+    const entries = String(value).split(',').map(s => s.trim()).filter(Boolean);
+    const last = entries[entries.length - 1];
+    if (!last) return 'UNKNOWN';
+    const params = last.split(';').slice(1).map(p => p.trim().toLowerCase());
+    if (params.includes('hit')) return 'HIT';
+    const fwd = params.find(p => p.startsWith('fwd='));
+    if (fwd) {
+        const reason = fwd.slice(4);
+        if (reason === 'bypass') return 'BYPASS';
+        if (reason === 'stale') return 'REVALIDATED';
+        if (reason.includes('miss')) return 'MISS';
+        return 'MISS';
+    }
+    return 'UNKNOWN';
+}
+
+export function classifyCacheHeader(header, rawValue) {
+    const value = String(rawValue ?? '').trim();
+    if (!value) return 'UNKNOWN';
+    if (header === 'cache-status') return classifyRfc9211(value);
+    if (header === 'x-cache-hits') {
+        const counts = value.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
+        if (counts.length === 0) return 'UNKNOWN';
+        return counts[counts.length - 1] > 0 || counts.some(n => n > 0) ? 'HIT' : 'MISS';
+    }
+    // Multi-tier values ("MISS, HIT") list tiers from origin side to client side;
+    // the last token is the edge closest to the visitor.
+    const tokens = value.split(',').map(s => s.trim()).filter(Boolean);
+    if (tokens.length > 1 && tokens.every(t => /^[A-Za-z_ -]+$/.test(t) && t.length < 24)) {
+        return classifyCacheToken(tokens[tokens.length - 1]);
+    }
+    return classifyCacheToken(value);
+}
+
+function parseCacheControl(cacheControl) {
+    const directives = cacheControl
+        ? cacheControl.split(',').map(s => s.trim()).filter(Boolean)
+        : [];
+    const map = {};
+    for (const d of directives) {
+        const eq = d.indexOf('=');
+        const name = (eq === -1 ? d : d.slice(0, eq)).trim().toLowerCase();
+        const val = eq === -1 ? true : d.slice(eq + 1).trim().replace(/^"|"$/g, '');
+        map[name] = val;
+    }
+    const num = (v) => (v === undefined || v === true) ? null : (/^\d+$/.test(String(v)) ? parseInt(v, 10) : null);
+    return {
+        directives,
+        noStore: 'no-store' in map,
+        noCache: 'no-cache' in map,
+        isPrivate: 'private' in map,
+        isPublic: 'public' in map,
+        maxAge: num(map['max-age']),
+        sMaxAge: num(map['s-maxage']),
+        immutable: 'immutable' in map,
+        mustRevalidate: 'must-revalidate' in map
+    };
+}
+
 export function analyzeCacheDetails(rawHeaders = {}, cdpContext = {}) {
     const headers = normalizeHeaders(rawHeaders);
 
-    // A. Browser HTTP Cache Evidence
     const fromDiskCache = Boolean(cdpContext && cdpContext.fromDiskCache);
     const fromMemoryCache = Boolean(cdpContext && (cdpContext.fromMemoryCache || cdpContext.servedFromCache));
     const fromPrefetchCache = Boolean(cdpContext && cdpContext.fromPrefetchCache);
@@ -442,78 +642,34 @@ export function analyzeCacheDetails(rawHeaders = {}, cdpContext = {}) {
         evidence: browserCacheType ? `cdp:from-${browserCacheType}-cache` : null
     };
 
-    // B. Service-Worker responses (not CDN hits)
     const fromServiceWorker = Boolean(cdpContext && cdpContext.fromServiceWorker);
     const serviceWorker = {
         fulfilledByServiceWorker: fromServiceWorker,
         evidence: fromServiceWorker ? 'cdp:fromServiceWorker' : null
     };
 
-    // C. CDN or Intermediary Edge Cache Status
-    let cdnStatus = "NONE";
-    let cdnHeader = null;
-    let cdnRawVal = null;
-    let cdnEvidence = null;
-
-    if (headers['cf-cache-status']) {
-        cdnHeader = 'cf-cache-status';
-        cdnRawVal = String(headers['cf-cache-status']).trim();
-    } else if (headers['x-cache']) {
-        cdnHeader = 'x-cache';
-        cdnRawVal = String(headers['x-cache']).trim();
-    } else if (headers['x-cache-hits']) {
-        cdnHeader = 'x-cache-hits';
-        cdnRawVal = String(headers['x-cache-hits']).trim();
-    } else if (headers['x-vercel-cache']) {
-        cdnHeader = 'x-vercel-cache';
-        cdnRawVal = String(headers['x-vercel-cache']).trim();
-    } else if (headers['x-nf-cache-status']) {
-        cdnHeader = 'x-nf-cache-status';
-        cdnRawVal = String(headers['x-nf-cache-status']).trim();
-    } else if (headers['cdn-cache']) {
-        cdnHeader = 'cdn-cache';
-        cdnRawVal = String(headers['cdn-cache']).trim();
-    } else if (headers['x-akamai-cache-status']) {
-        cdnHeader = 'x-akamai-cache-status';
-        cdnRawVal = String(headers['x-akamai-cache-status']).trim();
+    // Preserve every cache-layer header instead of keeping only one.
+    const layers = [];
+    for (const header of CACHE_STATUS_HEADERS) {
+        const raw = headers[header];
+        if (raw === undefined || raw === null || String(raw).trim() === '') continue;
+        layers.push({
+            header,
+            rawValue: String(raw).trim(),
+            status: classifyCacheHeader(header, raw),
+            evidence: `${header}: ${String(raw).trim()}`
+        });
     }
-
-    if (cdnHeader && cdnRawVal) {
-        cdnEvidence = `${cdnHeader}: ${cdnRawVal}`;
-        const valUpper = cdnRawVal.toUpperCase();
-
-        if (cdnHeader === 'x-cache-hits') {
-            const hits = parseInt(cdnRawVal, 10);
-            cdnStatus = (!isNaN(hits) && hits > 0) ? "HIT" : "MISS";
-        } else if (valUpper.includes('HIT')) {
-            if (valUpper.includes('REFRESH') || valUpper.includes('REVALIDATED')) {
-                cdnStatus = "REVALIDATED";
-            } else {
-                cdnStatus = "HIT";
-            }
-        } else if (valUpper.includes('EXPIRED')) {
-            cdnStatus = "EXPIRED";
-        } else if (valUpper.includes('REVALIDATED')) {
-            cdnStatus = "REVALIDATED";
-        } else if (valUpper.includes('STALE') || valUpper.includes('UPDATING')) {
-            cdnStatus = "STALE";
-        } else if (valUpper.includes('BYPASS') || valUpper.includes('DYNAMIC')) {
-            cdnStatus = "BYPASS";
-        } else if (valUpper.includes('MISS')) {
-            cdnStatus = "MISS";
-        } else {
-            cdnStatus = "UNKNOWN";
-        }
-    }
+    const primaryLayer = layers.find(l => l.status !== 'UNKNOWN') || layers[0] || null;
 
     const cdnCache = {
-        status: cdnStatus,
-        header: cdnHeader,
-        rawValue: cdnRawVal,
-        evidence: cdnEvidence
+        status: primaryLayer ? primaryLayer.status : 'NONE',
+        header: primaryLayer ? primaryLayer.header : null,
+        rawValue: primaryLayer ? primaryLayer.rawValue : null,
+        evidence: primaryLayer ? primaryLayer.evidence : null,
+        layers
     };
 
-    // D. Cache Policy (Cache-Control, Expires, Age)
     const cacheControl = headers['cache-control'] ? String(headers['cache-control']).toLowerCase() : null;
     const pragma = headers['pragma'] ? String(headers['pragma']).toLowerCase() : null;
     const expires = headers['expires'] || null;
@@ -523,46 +679,55 @@ export function analyzeCacheDetails(rawHeaders = {}, cdpContext = {}) {
         ageSeconds = parseInt(String(ageRaw).trim(), 10);
     }
 
-    let policyStatus = "No Cache Directives";
-    const directives = [];
+    const cc = parseCacheControl(cacheControl);
+    let policyStatus = 'No Cache Directives';
     if (cacheControl) {
-        directives.push(...cacheControl.split(',').map(s => s.trim()).filter(Boolean));
-        if (cacheControl.includes('no-store') || cacheControl.includes('no-cache')) {
-            policyStatus = "Not Cacheable";
-        } else if (cacheControl.includes('max-age') || cacheControl.includes('s-maxage') || cacheControl.includes('public')) {
-            policyStatus = "Cacheable";
-        } else if (cacheControl.includes('private')) {
-            policyStatus = "Private Cacheable";
+        if (cc.noStore) {
+            policyStatus = 'Not Cacheable';
+        } else if (cc.noCache) {
+            policyStatus = 'Revalidate Required';
+        } else if (cc.isPrivate) {
+            policyStatus = 'Private Cacheable';
+        } else if ((cc.sMaxAge !== null && cc.sMaxAge > 0) || (cc.maxAge !== null && cc.maxAge > 0) || cc.isPublic) {
+            policyStatus = 'Cacheable';
+        } else if (cc.maxAge === 0 || cc.sMaxAge === 0) {
+            policyStatus = 'Revalidate Required';
         }
     } else if (expires) {
-        policyStatus = "Cacheable (Expires)";
+        policyStatus = 'Cacheable (Expires)';
     }
 
     const cachePolicy = {
         status: policyStatus,
         cacheControl,
-        directives,
+        directives: cc.directives,
+        noStore: cc.noStore,
+        noCache: cc.noCache,
+        isPrivate: cc.isPrivate,
+        isPublic: cc.isPublic,
+        maxAge: cc.maxAge,
+        sMaxAge: cc.sMaxAge,
+        sharedCacheable: !cc.noStore && !cc.isPrivate,
         expires,
         ageSeconds,
         hasValidation: Boolean(headers['etag'] || headers['last-modified'])
     };
 
-    // E. Backwards-compatible summary status
-    let summary = "Unknown";
-    if (cdnCache.status !== "NONE" && cdnCache.status !== "UNKNOWN") {
+    let summary;
+    if (cdnCache.status !== 'NONE' && cdnCache.status !== 'UNKNOWN') {
         summary = cdnCache.status;
     } else if (serviceWorker.fulfilledByServiceWorker) {
-        summary = "Service Worker";
+        summary = 'Service Worker';
     } else if (browserCache.servedFromCache) {
-        summary = browserCache.type === 'memory' ? "Memory Cache" : "Disk Cache";
-    } else if (policyStatus === "Not Cacheable") {
-        summary = "Not Cacheable";
-    } else if (policyStatus.startsWith("Cacheable")) {
-        summary = "Cacheable";
-    } else if (cacheControl || expires || ageRaw || headers['etag'] || headers['last-modified'] || pragma) {
-        summary = "Unknown";
+        summary = browserCache.type === 'memory' ? 'Memory Cache' : 'Disk Cache';
+    } else if (['Not Cacheable', 'Revalidate Required', 'Private Cacheable'].includes(policyStatus)) {
+        summary = policyStatus;
+    } else if (policyStatus.startsWith('Cacheable')) {
+        summary = 'Cacheable';
+    } else if (cacheControl || expires || ageRaw || headers['etag'] || headers['last-modified'] || pragma || layers.length) {
+        summary = 'Unknown';
     } else {
-        summary = "No Cache Headers";
+        summary = 'No Cache Headers';
     }
 
     return {
@@ -575,24 +740,38 @@ export function analyzeCacheDetails(rawHeaders = {}, cdpContext = {}) {
 }
 
 export function extractCacheStatus(headers = {}, cdpContext = {}) {
-    const analysis = analyzeCacheDetails(headers, cdpContext);
-    return analysis.summary;
+    return analyzeCacheDetails(headers, cdpContext).summary;
 }
 
-/**
- * Extracts edge-server / Point of Presence (PoP) identifiers and network-level
- * remote IP records from response headers and connection metadata.
- * Edge identification is kept strictly separate from CDN provider identification.
- * Does NOT infer city or PoP from an IP address alone.
- */
+const EDGE_HEADER_PROVIDER = {
+    'cf-ray': 'Cloudflare',
+    'x-amz-cf-pop': 'Amazon CloudFront',
+    'x-amz-cf-id': 'Amazon CloudFront',
+    'x-served-by': 'Fastly',
+    'x-fastly-request-id': 'Fastly',
+    'akamai-grn': 'Akamai',
+    'x-akamai-request-id': 'Akamai',
+    'x-vercel-id': 'Vercel',
+    'x-77-pop': 'CDN77'
+};
+
 export function extractEdgeEvidence(rawHeaders = {}, providerName = '', remoteIp = null, remotePort = null) {
-    const headers = normalizeHeaders(rawHeaders);
+    const allHeaders = normalizeHeaders(rawHeaders);
+    // When a provider was identified, ignore edge headers that belong to a different
+    // provider so the reported PoP is the identified provider's edge.
+    const hasKnownProvider = providerName && providerName !== NOT_DETECTED &&
+        Object.keys(allHeaders).some(k => EDGE_HEADER_PROVIDER[k] === providerName);
+    const headers = {};
+    for (const [k, v] of Object.entries(allHeaders)) {
+        const owner = EDGE_HEADER_PROVIDER[k];
+        if (hasKnownProvider && owner && owner !== providerName) continue;
+        headers[k] = v;
+    }
     let edgePop = null;
     let popCode = null;
     let evidenceSource = null;
     let requestIdentifier = null;
 
-    // 1. Cloudflare: cf-ray (format: <hash>-<POP_IATA_CODE>)
     if (headers['cf-ray']) {
         const cfRay = String(headers['cf-ray']).trim();
         requestIdentifier = cfRay;
@@ -605,13 +784,8 @@ export function extractEdgeEvidence(rawHeaders = {}, providerName = '', remoteIp
                 evidenceSource = 'cf-ray';
             }
         }
-        if (!evidenceSource) {
-            evidenceSource = 'cf-ray';
-            edgePop = cfRay;
-        }
     }
 
-    // 2. Amazon CloudFront: x-amz-cf-pop (e.g. IAD89-C1) and x-amz-cf-id
     if (headers['x-amz-cf-pop']) {
         edgePop = String(headers['x-amz-cf-pop']).trim();
         evidenceSource = 'x-amz-cf-pop';
@@ -625,16 +799,15 @@ export function extractEdgeEvidence(rawHeaders = {}, providerName = '', remoteIp
         if (!evidenceSource) evidenceSource = 'x-amz-cf-id';
     }
 
-    // 3. Fastly: x-served-by (e.g. cache-iad-kiad12345-IAD) and x-fastly-request-id
     if (headers['x-served-by']) {
         const rawServed = String(headers['x-served-by']).trim();
         evidenceSource = 'x-served-by';
         const hops = rawServed.split(',').map(s => s.trim()).filter(Boolean);
         const lastHop = hops[hops.length - 1] || rawServed;
         edgePop = lastHop;
-        const m = lastHop.match(/-([A-Za-z]{3,4})$/);
+        const m = lastHop.match(/-([A-Za-z]{3,4})$/) || lastHop.match(/cache-([a-z0-9]+)-([A-Za-z]{3,4})/i);
         if (m) {
-            popCode = m[1].toUpperCase();
+            popCode = (m[2] || m[1]).toUpperCase();
         }
     }
     if (headers['x-fastly-request-id']) {
@@ -642,20 +815,16 @@ export function extractEdgeEvidence(rawHeaders = {}, providerName = '', remoteIp
         if (!evidenceSource) evidenceSource = 'x-fastly-request-id';
     }
 
-    // 4. Akamai: akamai-grn, x-akamai-request-id, x-akamai-transformed
     if (headers['akamai-grn']) {
         requestIdentifier = String(headers['akamai-grn']).trim();
         evidenceSource = 'akamai-grn';
-        edgePop = requestIdentifier;
     } else if (headers['x-akamai-request-id']) {
         requestIdentifier = String(headers['x-akamai-request-id']).trim();
         if (!evidenceSource) {
             evidenceSource = 'x-akamai-request-id';
-            edgePop = requestIdentifier;
         }
     }
 
-    // 5. Vercel: x-vercel-id (e.g. iad1::iad1::...)
     if (headers['x-vercel-id']) {
         const vercelId = String(headers['x-vercel-id']).trim();
         requestIdentifier = vercelId;
@@ -668,20 +837,17 @@ export function extractEdgeEvidence(rawHeaders = {}, providerName = '', remoteIp
         }
     }
 
-    // 6. CDN77: x-77-pop
     if (headers['x-77-pop']) {
         edgePop = String(headers['x-77-pop']).trim();
         evidenceSource = 'x-77-pop';
     }
 
-    // 7. KeyCDN: x-edge-location
-    if (headers['x-edge-location']) {
+    if (headers['x-edge-location'] && !edgePop) {
         edgePop = String(headers['x-edge-location']).trim();
         evidenceSource = 'x-edge-location';
     }
 
-    // 8. BunnyCDN: b-ray
-    if (headers['b-ray']) {
+    if (headers['b-ray'] && !edgePop) {
         edgePop = String(headers['b-ray']).trim();
         evidenceSource = 'b-ray';
     }
@@ -701,13 +867,9 @@ export function extractEdgeEvidence(rawHeaders = {}, providerName = '', remoteIp
     };
 }
 
-/**
- * Runs provider detection and edge evidence extraction against an individual resource.
- */
-export function detectResourceCdn(rawHeaders = {}, url = '', resourceType = 'Other', remoteIp = null, remotePort = null) {
+
+export function detectResourceCdn(rawHeaders = {}, url = '', resourceType = 'Other', remoteIp = null, remotePort = null, options = {}) {
     const headers = normalizeHeaders(rawHeaders);
-    const detection = detectCdnProvider(headers);
-    const edge = extractEdgeEvidence(headers, detection.provider, remoteIp, remotePort);
 
     let hostname = '';
     try {
@@ -716,27 +878,42 @@ export function detectResourceCdn(rawHeaders = {}, url = '', resourceType = 'Oth
         hostname = url || '';
     }
 
-    const isDetected = detection.provider &&
-        detection.provider !== 'Not Detected' &&
-        detection.provider !== 'Unknown';
+    const detection = detectCdnProvider(headers, {
+        remoteIp,
+        hostname,
+        cnames: options.cnames || [],
+        dnsInfo: options.dnsInfo || null
+    });
+    const edge = extractEdgeEvidence(headers, detection.provider, remoteIp, remotePort);
+    const isDetected = detection.provider && detection.provider !== NOT_DETECTED;
 
     return {
-        provider: isDetected ? detection.provider : 'Not Detected',
+        provider: isDetected ? detection.provider : NOT_DETECTED,
+        status: detection.status,
+        category: detection.category,
         confidence: detection.confidence,
         matchedEvidence: detection.evidence || [],
-        detectionMethod: isDetected ? 'response-header-inspection' : 'none',
+        evidenceDetails: detection.evidenceDetails || [],
+        detectionMethod: isDetected ? detection.detectionMethod : 'none',
+        conflict: detection.conflict,
+        notes: detection.notes || [],
         hostname,
         url,
         resourceType,
         edge,
         possibleLayers: detection.possibleLayers || [],
-        limitations: isDetected ? [] : ['No definitive CDN provider signature found in response headers']
+        limitations: isDetected ? [] : ['No provider-specific CDN signature found for this request (not proof of direct origin delivery)']
     };
 }
 
+function isIdentified(provider) {
+    return Boolean(provider) && provider !== NOT_DETECTED && provider !== 'Unknown';
+}
+
 /**
- * Groups per-resource CDN and edge detections by hostname, supporting multi-CDN
- * delivery architectures and preserving independent evidence per host.
+ * Per-host aggregation. Each host records how many requests matched each provider,
+ * and the host's provider is the one with the strongest confidence (ties broken by
+ * request count) — every count is kept so the choice is explainable.
  */
 export function aggregateHostCdn(resourcesList = [], mainUrl = '') {
     let mainHost = '';
@@ -746,26 +923,35 @@ export function aggregateHostCdn(resourcesList = [], mainUrl = '') {
 
     const byHost = {};
     const allProvidersSet = new Set();
+    const assetProviderMap = new Map();
+    let identifiedRequestCount = 0;
+    let totalRequestCount = 0;
+    let documentProvider = null;
 
     for (const res of resourcesList) {
         if (!res) continue;
-        const host = res.hostname || (res.url ? (() => { try { return new URL(res.url).hostname; } catch(e){ return ''; } })() : '');
+        const host = res.hostname || (res.url ? (() => { try { return new URL(res.url).hostname; } catch (e) { return ''; } })() : '');
         if (!host) continue;
+        totalRequestCount++;
 
         if (!byHost[host]) {
             byHost[host] = {
                 hostname: host,
-                provider: 'Not Detected',
+                provider: NOT_DETECTED,
                 confidence: 'none',
+                status: 'unidentified',
                 isCdn: false,
                 isMainHost: host === mainHost,
                 requestCount: 0,
+                cdnCount: 0,
                 encodedBytes: 0,
                 remoteIps: [],
                 edgePops: [],
                 resourceTypes: [],
                 evidence: [],
-                detectedProviders: []
+                detectedProviders: [],
+                providerCounts: {},
+                cnames: res.cnames || []
             };
         }
 
@@ -774,53 +960,72 @@ export function aggregateHostCdn(resourcesList = [], mainUrl = '') {
         hostEntry.encodedBytes += (res.encodedDataLength || 0);
 
         const type = res.resourceType || res.type || 'Other';
-        if (!hostEntry.resourceTypes.includes(type)) {
-            hostEntry.resourceTypes.push(type);
-        }
+        if (!hostEntry.resourceTypes.includes(type)) hostEntry.resourceTypes.push(type);
 
         const remoteIp = res.remoteIPAddress || res.edge?.remoteIp;
-        if (remoteIp && !hostEntry.remoteIps.includes(remoteIp)) {
-            hostEntry.remoteIps.push(remoteIp);
-        }
+        if (remoteIp && !hostEntry.remoteIps.includes(remoteIp)) hostEntry.remoteIps.push(remoteIp);
 
         const edgePop = res.edge?.edgePop;
-        if (edgePop && !hostEntry.edgePops.includes(edgePop)) {
-            hostEntry.edgePops.push(edgePop);
-        }
+        if (edgePop && !hostEntry.edgePops.includes(edgePop)) hostEntry.edgePops.push(edgePop);
 
         const provider = res.cdn?.provider;
         const confidence = res.cdn?.confidence || 'none';
-        if (provider && provider !== 'Not Detected' && provider !== 'Unknown') {
-            allProvidersSet.add(provider);
-            if (!hostEntry.detectedProviders.includes(provider)) {
-                hostEntry.detectedProviders.push(provider);
-            }
+        if (!isIdentified(provider)) continue;
 
-            const weightCurrent = CONF_WEIGHT[hostEntry.confidence] || 0;
-            const weightNew = CONF_WEIGHT[confidence] || 0;
-            if (weightNew > weightCurrent || hostEntry.provider === 'Not Detected') {
-                hostEntry.provider = provider;
-                hostEntry.confidence = confidence;
-                hostEntry.isCdn = true;
-            }
-            if (res.cdn?.matchedEvidence) {
-                for (const ev of res.cdn.matchedEvidence) {
-                    if (!hostEntry.evidence.includes(ev)) {
-                        hostEntry.evidence.push(ev);
-                    }
-                }
-            }
+        identifiedRequestCount++;
+        hostEntry.cdnCount++;
+        allProvidersSet.add(provider);
+        if (!hostEntry.detectedProviders.includes(provider)) hostEntry.detectedProviders.push(provider);
+
+        const pc = hostEntry.providerCounts[provider] || { count: 0, bestConfidence: 'none', status: res.cdn?.status || 'identified' };
+        pc.count++;
+        if ((CONF_WEIGHT[confidence] || 0) > (CONF_WEIGHT[pc.bestConfidence] || 0)) pc.bestConfidence = confidence;
+        hostEntry.providerCounts[provider] = pc;
+
+        for (const ev of (res.cdn?.matchedEvidence || [])) {
+            if (!hostEntry.evidence.includes(ev) && hostEntry.evidence.length < 12) hostEntry.evidence.push(ev);
+        }
+
+        const isDocument = String(type).toLowerCase() === 'document';
+        if (isDocument && host === mainHost && !documentProvider) {
+            documentProvider = provider;
+        }
+        if (!isDocument) {
+            const ap = assetProviderMap.get(provider) || { provider, requestCount: 0, hosts: [] };
+            ap.requestCount++;
+            if (!ap.hosts.includes(host)) ap.hosts.push(host);
+            assetProviderMap.set(provider, ap);
+        }
+    }
+
+    for (const hostEntry of Object.values(byHost)) {
+        const ranked = Object.entries(hostEntry.providerCounts).sort((a, b) => {
+            const cw = (CONF_WEIGHT[b[1].bestConfidence] || 0) - (CONF_WEIGHT[a[1].bestConfidence] || 0);
+            return cw !== 0 ? cw : b[1].count - a[1].count;
+        });
+        if (ranked.length > 0) {
+            const [provider, info] = ranked[0];
+            hostEntry.provider = provider;
+            hostEntry.confidence = info.bestConfidence;
+            hostEntry.status = info.status;
+            hostEntry.isCdn = true;
         }
     }
 
     const allProviders = Array.from(allProvidersSet);
-    const mainHostProvider = (mainHost && byHost[mainHost]) ? byHost[mainHost].provider : 'Not Detected';
+    const mainHostProvider = (mainHost && byHost[mainHost]) ? byHost[mainHost].provider : NOT_DETECTED;
 
     return {
         byHost,
         allProviders,
         mainHostProvider,
-        crossHostCdnCount: allProviders.length
+        crossHostCdnCount: allProviders.length,
+        delivery: {
+            documentProvider: documentProvider || NOT_DETECTED,
+            assetProviders: Array.from(assetProviderMap.values()).sort((a, b) => b.requestCount - a.requestCount),
+            identifiedRequestCount,
+            unidentifiedRequestCount: totalRequestCount - identifiedRequestCount,
+            totalRequestCount
+        }
     };
 }
-

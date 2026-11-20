@@ -1,13 +1,28 @@
-/**
- * CDN Analyzer Pro v2 - Metrics Module
- * Calculates network phase timings (DNS, TCP, TLS, TTFB, Download, DOM, Load, Idle)
- *
- * FIXES APPLIED:
- *  BUG-09: TTFB fallback changed from fabricated 50ms to null. The UI's
- *          formatDuration(null) displays "Not Available" instead of a fake value.
- *  BUG-10: downloadMs fallback changed from fabricated 10ms to null for the
- *          same reason.
- */
+export function parseServerTiming(headerValue) {
+    if (!headerValue || typeof headerValue !== 'string') return [];
+    const entries = [];
+    const parts = headerValue.split(',');
+    for (const part of parts) {
+        const trimmed = part.trim();
+        if (!trimmed) continue;
+        const subParts = trimmed.split(';').map(s => s.trim());
+        const name = subParts[0];
+        if (!name) continue;
+        let dur = null;
+        let desc = null;
+        for (let i = 1; i < subParts.length; i++) {
+            const [k, v] = subParts[i].split('=').map(s => s.trim());
+            if (k && k.toLowerCase() === 'dur' && v) {
+                const parsed = parseFloat(v.replace(/["']/g, ''));
+                if (Number.isFinite(parsed)) dur = parsed;
+            } else if (k && k.toLowerCase() === 'desc' && v) {
+                desc = v.replace(/["']/g, '');
+            }
+        }
+        entries.push({ name, dur, desc });
+    }
+    return entries;
+}
 
 export function calculateMetrics(data) {
     const {
@@ -25,8 +40,6 @@ export function calculateMetrics(data) {
         ? navigationStartCDP
         : (mainReq && mainReq.requestWillBeSentTime > 0 ? mainReq.requestWillBeSentTime : null);
 
-    // Timing measurements: null represents unavailable / not applicable / not performed.
-    // 0 represents a genuinely measured 0ms duration.
     let dnsMs = null;
     let tcpMs = null;
     let tlsMs = null;
@@ -35,6 +48,8 @@ export function calculateMetrics(data) {
     let responseHeadersEndTime = null;
     let downloadMs = null;
     let documentMs = null;
+    let ttfbSource = null;
+    let ttfbUnavailableReason = mainDocumentResponse ? 'CDP detailed timing was not provided for the main document' : 'Main document response was not captured';
 
     let reused = false;
     let protocol = "Unknown";
@@ -47,20 +62,18 @@ export function calculateMetrics(data) {
     };
 
     if (mainDocumentResponse) {
-        // Negotiated HTTP protocol: report only when observed; otherwise Unknown
+
         if (mainDocumentResponse.protocol && typeof mainDocumentResponse.protocol === 'string' && mainDocumentResponse.protocol.trim()) {
             protocol = mainDocumentResponse.protocol.trim();
         }
         remoteIp = mainDocumentResponse.remoteIPAddress || null;
 
-        // Connection reuse: CDP exposes connectionReused boolean or timing with start offsets of -1
         const timing = mainDocumentResponse.timing;
         reused = Boolean(
             mainDocumentResponse.connectionReused ||
             (timing && timing.dnsStart === -1 && timing.connectStart === -1)
         );
 
-        // Compression: "None" when headers observed without content-encoding; "Unknown" when headers unobserved
         if (mainDocumentResponse.headers && typeof mainDocumentResponse.headers === 'object') {
             const enc = mainDocumentResponse.headers['content-encoding'] ||
                         mainDocumentResponse.headers['Content-Encoding'] ||
@@ -69,20 +82,19 @@ export function calculateMetrics(data) {
         }
 
         if (timing) {
-            // Reused connections did not perform DNS, TCP, or TLS phases for this request
+
             if (reused) {
                 dnsMs = null;
                 tcpMs = null;
                 tlsMs = null;
             } else {
-                // DNS Resolution
+
                 if (timing.dnsStart >= 0 && timing.dnsEnd >= 0 && timing.dnsEnd >= timing.dnsStart) {
                     dnsMs = roundDuration(timing.dnsEnd - timing.dnsStart);
                 } else {
                     dnsMs = null;
                 }
 
-                // TCP Connection (or QUIC transport establishment)
                 if (timing.connectStart >= 0 && timing.connectEnd >= 0 && timing.connectEnd >= timing.connectStart) {
                     const transportEnd = (timing.sslStart >= timing.connectStart && timing.sslStart <= timing.connectEnd)
                         ? timing.sslStart
@@ -94,7 +106,6 @@ export function calculateMetrics(data) {
                     tcpMs = null;
                 }
 
-                // TLS Handshake
                 if (timing.sslStart >= 0 && timing.sslEnd >= 0 && timing.sslEnd >= timing.sslStart) {
                     tlsMs = roundDuration(timing.sslEnd - timing.sslStart);
                 } else {
@@ -102,39 +113,56 @@ export function calculateMetrics(data) {
                 }
             }
 
-            // Request Dispatch (send phase)
             if (timing.sendStart >= 0 && timing.sendEnd >= 0 && timing.sendEnd >= timing.sendStart) {
                 requestSentMs = roundDuration(timing.sendEnd - timing.sendStart);
             } else {
                 requestSentMs = null;
             }
 
-            // TTFB (Time to First Byte): represents total elapsed duration from request dispatch
-            // until the first byte of response headers is received (includes network latency,
-            // server processing, and initial response transit; not pure server execution time).
-            if (timing.receiveHeadersStart >= 0) {
-                ttfbMs = roundDuration(timing.receiveHeadersStart);
+            // TTFB (DevTools "Waiting for server response") requires both the request-sent
+            // and response-headers markers. If either is missing, TTFB is unavailable —
+            // it is never estimated from other events.
+            const sendEnd = (timing.sendEnd >= 0)
+                ? timing.sendEnd
+                : ((timing.sendStart >= 0) ? timing.sendStart : null);
+
+            const receiveHeadersStart = (timing.receiveHeadersStart >= 0)
+                ? timing.receiveHeadersStart
+                : ((timing.receiveHeadersEnd >= 0) ? timing.receiveHeadersEnd : null);
+
+            if (receiveHeadersStart !== null && sendEnd !== null && receiveHeadersStart >= sendEnd) {
+                ttfbMs = roundDuration(receiveHeadersStart - sendEnd);
+                ttfbSource = 'cdp-timing';
+            } else {
+                ttfbUnavailableReason = 'CDP timing is missing request-sent or response-header markers';
             }
-            if (timing.receiveHeadersEnd >= 0 && timing.requestTime >= 0) {
-                responseHeadersEndTime = (timing.requestTime * 1000) + timing.receiveHeadersEnd;
+
+            const headersEndOffset = (timing.receiveHeadersEnd >= 0)
+                ? timing.receiveHeadersEnd
+                : receiveHeadersStart;
+
+            if (headersEndOffset !== null && timing.requestTime >= 0) {
+                responseHeadersEndTime = (timing.requestTime * 1000) + headersEndOffset;
             }
         }
     }
 
+    let serverTiming = [];
+    if (mainDocumentResponse?.headers && typeof mainDocumentResponse.headers === 'object') {
+        const rawServerTiming = mainDocumentResponse.headers['server-timing'] ||
+                                mainDocumentResponse.headers['Server-Timing'] ||
+                                null;
+        if (rawServerTiming) {
+            serverTiming = parseServerTiming(String(rawServerTiming));
+        }
+    }
+
+    let totalRequestMs = null;
     if (mainReq) {
         const respRecv = mainReq.responseReceivedTime;
         const loadFin = mainReq.loadingFinishedTime;
         const reqSent = mainReq.requestWillBeSentTime;
 
-        // Fallback for TTFB from lifecycle timestamps if CDP timing was unavailable
-        if ((ttfbMs === null || !Number.isFinite(ttfbMs) || ttfbMs < 0) &&
-            respRecv !== null && reqSent !== null &&
-            Number.isFinite(respRecv) && Number.isFinite(reqSent) &&
-            respRecv >= reqSent) {
-            ttfbMs = roundDuration(respRecv - reqSent);
-        }
-
-        // Content download duration: interval from response header receipt to loading finished
         const downloadStart = responseHeadersEndTime ?? respRecv;
         if (loadFin !== null && downloadStart !== null &&
             Number.isFinite(loadFin) && Number.isFinite(downloadStart) &&
@@ -148,7 +176,14 @@ export function calculateMetrics(data) {
             downloadMs = null;
         }
 
-        // Main document total request duration
+        const timing = mainDocumentResponse?.timing;
+        const reqStart = (timing && timing.requestTime >= 0) ? (timing.requestTime * 1000) : reqSent;
+        if (loadFin !== null && reqStart !== null &&
+            Number.isFinite(loadFin) && Number.isFinite(reqStart) &&
+            loadFin >= reqStart) {
+            totalRequestMs = roundDuration(loadFin - reqStart);
+        }
+
         if (loadFin !== null && navStart !== null &&
             Number.isFinite(loadFin) && Number.isFinite(navStart) &&
             loadFin >= navStart) {
@@ -157,20 +192,17 @@ export function calculateMetrics(data) {
                    Number.isFinite(loadFin) && Number.isFinite(reqSent) &&
                    loadFin >= reqSent) {
             documentMs = roundDuration(loadFin - reqSent);
-        } else if (ttfbMs !== null && downloadMs !== null) {
-            documentMs = roundDuration(ttfbMs + downloadMs);
         } else {
-            documentMs = ttfbMs ?? downloadMs ?? null;
+            // Not substituted from partial phases (TTFB or download alone is not the document time).
+            documentMs = null;
         }
     }
 
-    // Keep null as the canonical sentinel for unmeasured / unavailable metrics
     ttfbMs = (ttfbMs !== null && Number.isFinite(ttfbMs) && ttfbMs >= 0) ? ttfbMs : null;
     downloadMs = (downloadMs !== null && Number.isFinite(downloadMs) && downloadMs >= 0) ? downloadMs : null;
     documentMs = (documentMs !== null && Number.isFinite(documentMs) && documentMs >= 0) ? documentMs : null;
+    totalRequestMs = (totalRequestMs !== null && Number.isFinite(totalRequestMs) && totalRequestMs >= 0) ? totalRequestMs : null;
 
-    // Navigation-level lifecycle timings: keep separate from individual resource timings.
-    // Return null when event did not fire rather than substituting documentMs or 0.
     const domContentLoadedMs = (domContentTime !== null && navStart !== null &&
         Number.isFinite(domContentTime) && Number.isFinite(navStart) &&
         domContentTime >= navStart)
@@ -203,7 +235,11 @@ export function calculateMetrics(data) {
             tlsMs,
             requestSentMs,
             ttfbMs,
+            serverWaitingMs: ttfbMs,
+            ttfbSource: ttfbMs !== null ? ttfbSource : null,
+            ttfbUnavailableReason: ttfbMs !== null ? null : ttfbUnavailableReason,
             downloadMs,
+            totalRequestMs,
             documentMs,
             domContentLoadedMs,
             loadEventMs,
@@ -214,7 +250,25 @@ export function calculateMetrics(data) {
             protocol,
             remoteIp,
             compression
-        }
+        },
+        serverTiming
     };
 }
 
+export function calculateTransferSpeed(bytes, durationMs) {
+    if (!bytes || !Number.isFinite(bytes) || bytes <= 0 ||
+        !durationMs || !Number.isFinite(durationMs) || durationMs <= 0) {
+        return null;
+    }
+    return (bytes / durationMs) * 1000;
+}
+
+export function formatTransferSpeed(bytesPerSec) {
+    if (!bytesPerSec || !Number.isFinite(bytesPerSec) || bytesPerSec <= 0) {
+        return "Not Available";
+    }
+    if (bytesPerSec >= 1024 * 1024) {
+        return `${(bytesPerSec / (1024 * 1024)).toFixed(2)} MB/s`;
+    }
+    return `${(bytesPerSec / 1024).toFixed(1)} KB/s`;
+}
