@@ -1,9 +1,9 @@
 import assert from 'node:assert';
-import { calculateMetrics, calculateTransferSpeed, formatTransferSpeed } from '../modules/metrics.js';
-import { detectCdnProvider, analyzeCacheDetails } from '../modules/cdn.js';
-import { analyzeSecurity } from '../modules/security.js';
-import { calculatePerformanceScore, generateSuggestions } from '../modules/scoring.js';
-import { analyzeResources } from '../modules/resources.js';
+import { calculateMetrics, calculateTransferSpeed, formatTransferSpeed } from '../extension/modules/metrics.js';
+import { detectCdnProvider, analyzeCacheDetails } from '../extension/modules/cdn.js';
+import { analyzeSecurity } from '../extension/modules/security.js';
+import { calculatePerformanceScore, generateSuggestions } from '../extension/modules/scoring.js';
+import { analyzeResources } from '../extension/modules/resources.js';
 
 console.log("==================================================================");
 console.log("TEST SUITE: Analysis Report Generation & Lifecycle Fix Verification");
@@ -280,7 +280,7 @@ globalThis.chrome = {
     }
 };
 
-const bg = await import('../background.js');
+const bg = await import('../extension/background.js');
 
 await test("7. Fresh session enforced: Completed analyses are not stored in persistent cache and reopen returns fresh state", async () => {
     await bg.clearAnalysisState();

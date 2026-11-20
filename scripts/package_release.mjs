@@ -11,8 +11,9 @@ import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const rootDir = path.resolve(__dirname, '..');
-const distDir = path.resolve(rootDir, 'dist');
+const repoDir = path.resolve(__dirname, '..');
+const rootDir = path.resolve(repoDir, 'extension');
+const distDir = path.resolve(repoDir, 'dist');
 const packageDir = path.resolve(distDir, 'cdn-analyzer-pro');
 
 const manifest = JSON.parse(fs.readFileSync(path.join(rootDir, 'manifest.json'), 'utf8'));
@@ -186,7 +187,7 @@ end.writeUInt32LE(centralBuf.length, 12);
 end.writeUInt32LE(offset, 16);
 fs.writeFileSync(zipFile, Buffer.concat([...localParts, centralBuf, end]));
 
-console.log(`  ✓ ${path.relative(rootDir, zipFile)} (${(fs.statSync(zipFile).size / 1024).toFixed(1)} KB, ${files.length} files)`);
+console.log(`  ✓ ${path.relative(repoDir, zipFile)} (${(fs.statSync(zipFile).size / 1024).toFixed(1)} KB, ${files.length} files)`);
 console.log('==================================================================');
 console.log('RELEASE PACKAGE READY');
 console.log('==================================================================');

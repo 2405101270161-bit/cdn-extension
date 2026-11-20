@@ -1,11 +1,11 @@
 import assert from 'assert';
-import { calculateMetrics } from '../modules/metrics.js';
-import { analyzeResources, getRegistrableDomain } from '../modules/resources.js';
-import { analyzeCacheDetails, extractCacheStatus } from '../modules/cdn.js';
-import { calculatePerformanceScore } from '../modules/scoring.js';
+import { calculateMetrics } from '../extension/modules/metrics.js';
+import { analyzeResources, getRegistrableDomain } from '../extension/modules/resources.js';
+import { analyzeCacheDetails, extractCacheStatus } from '../extension/modules/cdn.js';
+import { calculatePerformanceScore } from '../extension/modules/scoring.js';
 
 console.log("=================================================");
-console.log("Running Goal 3 Network Metrics & Accounting Tests");
+console.log("Metrics and transfer accounting tests");
 console.log("=================================================");
 
 let passed = 0;
@@ -416,5 +416,5 @@ console.log(`RESULTS: ${passed} of ${total} tests PASSED!`);
 console.log("=================================================");
 
 if (passed === total) {
-    console.log("ALL 14 GOAL 3 SCENARIOS VERIFIED SUCCESSFULLY!");
+    console.log("All metrics scenarios passed.");
 }

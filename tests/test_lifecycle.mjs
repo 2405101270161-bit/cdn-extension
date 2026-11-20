@@ -91,7 +91,7 @@ const mockChrome = {
 
 globalThis.chrome = mockChrome;
 
-const bg = await import('../background.js');
+const bg = await import('../extension/background.js');
 
 await test("A new analysis begins with fresh application state (all storage cleared)", async () => {
     storageSession['cdnAnalyzerAnalysisState'] = { status: 'completed', oldData: true };

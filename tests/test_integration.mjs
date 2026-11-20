@@ -1,6 +1,6 @@
 import assert from 'node:assert';
-import { calculateMetrics } from '../modules/metrics.js';
-import { analyzeResources } from '../modules/resources.js';
+import { calculateMetrics } from '../extension/modules/metrics.js';
+import { analyzeResources } from '../extension/modules/resources.js';
 import {
     detectCdnProvider,
     detectResourceCdn,
@@ -8,9 +8,9 @@ import {
     analyzeCacheDetails,
     extractEdgeEvidence,
     aggregateHostCdn
-} from '../modules/cdn.js';
-import { analyzeSecurity } from '../modules/security.js';
-import { calculatePerformanceScore, generateSuggestions } from '../modules/scoring.js';
+} from '../extension/modules/cdn.js';
+import { analyzeSecurity } from '../extension/modules/security.js';
+import { calculatePerformanceScore, generateSuggestions } from '../extension/modules/scoring.js';
 
 console.log("=================================================");
 console.log("Test Suite: End-to-End Pipeline Integration");

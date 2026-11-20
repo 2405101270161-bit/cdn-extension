@@ -1,5 +1,5 @@
 import assert from 'node:assert';
-import { calculateMetrics, parseServerTiming } from '../modules/metrics.js';
+import { calculateMetrics, parseServerTiming } from '../extension/modules/metrics.js';
 
 console.log("=================================================");
 console.log("Test Suite: Network Timing Calculations");

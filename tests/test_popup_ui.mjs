@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const rootDir = path.resolve(__dirname, '..');
+const rootDir = path.resolve(__dirname, '..', 'extension');
 
 console.log("==================================================================");
 console.log("TEST SUITE: Frontend UI/UX Refinement & Responsive Layout Audit");

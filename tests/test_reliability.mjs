@@ -1,7 +1,7 @@
 import assert from 'node:assert';
 
 console.log("=================================================");
-console.log("Test Suite: Reliability & Error Handling (Goal 5)");
+console.log("Reliability and error handling tests");
 console.log("=================================================");
 
 let passed = 0;
@@ -121,8 +121,8 @@ const mockChrome = {
 
 globalThis.chrome = mockChrome;
 
-const bg = await import('../background.js');
-const cdp = await import('../modules/cdp.js');
+const bg = await import('../extension/background.js');
+const cdp = await import('../extension/modules/cdp.js');
 
 await test("1. Debugger attachment failure cleans up created tab and reports actionable error", async () => {
     attachShouldFail = true;
