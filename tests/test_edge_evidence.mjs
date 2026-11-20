@@ -1,5 +1,5 @@
 import assert from 'node:assert';
-import { extractEdgeEvidence, detectCdnProvider } from '../modules/cdn.js';
+import { extractEdgeEvidence, detectCdnProvider } from '../extension/modules/cdn.js';
 
 console.log("=================================================");
 console.log("Test Suite: Edge-Server Evidence & Identification");

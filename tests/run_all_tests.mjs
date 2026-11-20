@@ -11,11 +11,11 @@ const suites = [
     { name: "4. Cache Analysis & States", file: "test_cache_analysis.mjs" },
     { name: "5. Analysis Lifecycle & Isolation", file: "test_lifecycle.mjs" },
     { name: "6. End-to-End Pipeline Integration", file: "test_integration.mjs" },
-    { name: "7. Metrics & Accounting Verification", file: "test_goal3_metrics.mjs" },
+    { name: "7. Metrics and transfer accounting", file: "test_metrics.mjs" },
     { name: "8. Reliability & Error Handling", file: "test_reliability.mjs" },
-    { name: "9. Analysis Report Generation & Lifecycle Fix", file: "test_analysis_report_fix.mjs" },
-    { name: "10. Frontend UI/UX Refinement & Responsive Layout", file: "test_ui_refinement.mjs" },
-    { name: "11. Evidence Accuracy & False-Positive Controls", file: "test_evidence_accuracy.mjs" }
+    { name: "9. Report generation", file: "test_report.mjs" },
+    { name: "10. Popup UI and layout", file: "test_popup_ui.mjs" },
+    { name: "11. Evidence accuracy and false positives", file: "test_evidence_accuracy.mjs" }
 ];
 
 let totalTests = 0;
@@ -70,9 +70,9 @@ for (const s of summary) {
 console.log("==================================================================");
 
 if (allPassed) {
-    console.log(`ALL ${suites.length} TEST SUITES (${totalPassed} of ${totalTests} DETERMINISTIC TESTS) PASSED SUCCESSFULLY!`);
+    console.log(`All ${suites.length} suites passed (${totalPassed} tests).`);
     process.exit(0);
 } else {
-    console.error(`SOME TEST SUITES ENCOUNTERED FAILURES! (${totalPassed} of ${totalTests} tests passed)`);
+    console.error(`Some tests failed: ${totalPassed} of ${totalTests} passed.`);
     process.exit(1);
 }

@@ -7,7 +7,7 @@ import {
     detectCdnFromCname,
     detectCdnFromIp,
     resolveDnsCname
-} from '../modules/cdn.js';
+} from '../extension/modules/cdn.js';
 
 console.log("=================================================");
 console.log("Test Suite: CDN Provider Detection");

@@ -11,9 +11,9 @@ import {
     parseIp,
     ipInCidr,
     extractEdgeEvidence
-} from '../modules/cdn.js';
-import { calculateMetrics } from '../modules/metrics.js';
-import { calculatePerformanceScore, generateSuggestions } from '../modules/scoring.js';
+} from '../extension/modules/cdn.js';
+import { calculateMetrics } from '../extension/modules/metrics.js';
+import { calculatePerformanceScore, generateSuggestions } from '../extension/modules/scoring.js';
 import { FIXTURES } from './fixtures/provider_fixtures.mjs';
 
 console.log("=================================================");

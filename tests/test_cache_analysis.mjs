@@ -1,5 +1,5 @@
 import assert from 'node:assert';
-import { analyzeCacheDetails, extractCacheStatus } from '../modules/cdn.js';
+import { analyzeCacheDetails, extractCacheStatus } from '../extension/modules/cdn.js';
 
 console.log("=================================================");
 console.log("Test Suite: Cache Analysis");
