@@ -1,22 +1,3 @@
-/**
- * CDN Analyzer Pro v2 - CDP Orchestration & Background Tab Module
- * Manages background tab creation, debugger attachment, CDP event capture, and strict cleanup.
- *
- * FIXES APPLIED:
- *  BUG-02: Buffer Network.responseReceivedExtraInfo events that arrive before
- *          requestWillBeSent has created the map entry. Merge at entry creation
- *          time and again at finishAnalysis.
- *  BUG-03: mainRequestId is only assigned from type === 'Document' requests.
- *          Removed the unsafe `|| !mainRequestId` fallback that caused any
- *          first-arriving request (favicon, prefetch) to steal the main ID.
- *  BUG-05: Network.loadingFailed no longer marks a request as failed when a
- *          responseReceived event already recorded an HTTP status < 400. This
- *          fixes "Failed=1 while HTTP Status=200".
- *  BUG-07: navigationStartCDP is only set from Document-type requests so that
- *          all relative timings (domContentLoaded, loadEvent) use the correct
- *          epoch baseline.
- */
-
 import {
     detectCdnProvider,
     extractCacheStatus,
@@ -24,28 +5,22 @@ import {
     detectResourceCdn,
     extractEdgeEvidence,
     aggregateHostCdn,
-    scrubSensitiveHeaders
+    scrubSensitiveHeaders,
+    resolveHostCnames
 } from './cdn.js';
 import { analyzeSecurity } from './security.js';
 import { analyzeResources } from './resources.js';
-import { calculateMetrics } from './metrics.js';
+import { calculateMetrics, calculateTransferSpeed, formatTransferSpeed } from './metrics.js';
 import { calculatePerformanceScore, generateSuggestions } from './scoring.js';
 
-/**
- * Sanitizes error messages by scrubbing sensitive credentials, query parameters,
- * and normalizing common network failure strings into user-friendly messages.
- */
 export function sanitizeErrorMessage(rawError) {
     if (!rawError) return "Unknown analysis error.";
     let msg = typeof rawError === 'string' ? rawError : (rawError.message || String(rawError));
 
-    // Strip Basic Auth credentials: https://username:password@example.com -> https://example.com
     msg = msg.replace(/(https?:\/\/)([^:\s/@]+):([^@\s/]+)@/gi, '$1');
 
-    // Redact sensitive query parameters in URLs (token, key, auth, secret, password, session, etc.)
     msg = msg.replace(/([?&](?:token|key|api_key|apikey|secret|password|auth|access_token|session)=)[^&\s]+/gi, '$1[REDACTED]');
 
-    // Normalize common network failure strings into actionable messages
     if (msg.includes('net::ERR_NAME_NOT_RESOLVED')) {
         return "Domain name could not be resolved. Please verify the URL.";
     }
@@ -54,6 +29,18 @@ export function sanitizeErrorMessage(rawError) {
     }
     if (msg.includes('net::ERR_CONNECTION_TIMED_OUT') || msg.includes('Navigation timed out')) {
         return "Navigation timed out while waiting for server response.";
+    }
+    if (msg.includes('net::ERR_CERT_') || msg.includes('net::ERR_SSL_')) {
+        return "The site's TLS certificate or HTTPS configuration was rejected by Chrome.";
+    }
+    if (msg.includes('net::ERR_INTERNET_DISCONNECTED') || msg.includes('net::ERR_NETWORK_CHANGED')) {
+        return "No internet connection was available during the analysis.";
+    }
+    if (msg.includes('net::ERR_BLOCKED_BY_CLIENT') || msg.includes('net::ERR_BLOCKED_BY_ADMINISTRATOR')) {
+        return "The page load was blocked by another extension or by browser policy.";
+    }
+    if (/net::ERR_[A-Z_]+/.test(msg) && !/\s/.test(msg.trim())) {
+        return `The page could not be loaded (${msg.trim()}).`;
     }
     if (msg.includes('Cannot attach to this target') || msg.includes('Another debugger is already attached')) {
         return "Could not attach debugger to analysis tab. Another debugger may be active.";
@@ -201,14 +188,15 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress, cancelToken = null) 
 
         const requests = new Map();
 
-        // BUG-02 FIX: Side-buffer for ExtraInfo events that arrive before
-        // requestWillBeSent has created the corresponding map entry.
         const extraInfoBuffer = new Map();
 
         let mainRequestId = null;
+        let mainFrameId = null;
+        let isMainDocumentLocked = false;
         let mainNavigationStart = null;
         let mainDocumentResponse = null;
         let mainExtraHeadersStore = null;
+        let mainDocumentErrorText = null;
         let domContentTime = null;
         let loadEventTime = null;
         let lastActivityTime = null;
@@ -290,7 +278,8 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress, cancelToken = null) 
             }
         }
 
-        function finishAnalysis(reason = "complete") {
+        async function finishAnalysis(reason = "complete") {
+            const finishReason = reason;
             if (isResolved) return;
             if (cancelToken?.isCancelled) {
                 abortAnalysis(new Error("Analysis cancelled"));
@@ -301,11 +290,6 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress, cancelToken = null) 
             clearAllTimers();
             cleanupListeners();
 
-            cleanupListeners();
-
-            // BUG-02 FIX: At analysis completion, flush any remaining buffered
-            // ExtraInfo events into their map entries (handles cases where
-            // ExtraInfo arrived after loadingFinished but before we resolved).
             for (const [bufferedId, bufferedHeaders] of extraInfoBuffer.entries()) {
                 const reqData = requests.get(bufferedId);
                 if (reqData && !reqData.rawResponseHeaders) {
@@ -313,6 +297,35 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress, cancelToken = null) 
                 }
             }
             extraInfoBuffer.clear();
+
+            // Only a Document response may stand in for the main document. A script or
+            // image response is never reported as the page's response.
+            if (!mainDocumentResponse && requests.size > 0) {
+                for (const [id, req] of requests.entries()) {
+                    if (req.response && req.type === 'Document') {
+                        mainRequestId = id;
+                        mainDocumentResponse = req.response;
+                        if (req.response.url) finalUrl = req.response.url;
+                        break;
+                    }
+                }
+            }
+            const mainDocumentCaptured = Boolean(mainDocumentResponse);
+            // A navigation that failed outright (DNS failure, refused, TLS error…) is an error,
+            // not an analysis of Chrome's own error page.
+            if (!mainDocumentCaptured && mainDocumentErrorText) {
+                requests.clear();
+                extraInfoBuffer.clear();
+                reject(new Error(mainDocumentErrorText));
+                return;
+            }
+            const warnings = [];
+            if (!mainDocumentCaptured) {
+                warnings.push('The main document response was not captured. Status code, CDN, cache and header results for the document are unavailable.');
+            }
+            if (finishReason && /timed out|cap after DOMContentLoaded/i.test(finishReason)) {
+                warnings.push(`Capture ended early: ${finishReason}. Late requests may be missing.`);
+            }
 
             try {
                 notifyProgress("Calculating DNS, TCP, TLS, and TTFB...");
@@ -345,11 +358,47 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress, cancelToken = null) 
                     }
                 }
 
-                const cdnResult = detectCdnProvider(rawHeaders);
+                const mainHost = (() => { try { return new URL(finalUrl).hostname.toLowerCase(); } catch (e) { return null; } })();
+
+                // Resolve CNAME chains for the document host and every unique resource host
+                // (deduplicated, concurrency-limited, time-budgeted and cancellable).
+                notifyProgress("Resolving DNS aliases...");
+                const hostSet = new Set();
+                if (mainHost) hostSet.add(mainHost);
+                for (const req of requests.values()) {
+                    if (!req.url || !/^https?:\/\//i.test(req.url)) continue;
+                    try { hostSet.add(new URL(req.url).hostname.toLowerCase()); } catch (e) {}
+                }
+                const dnsController = new AbortController();
+                if (cancelToken) {
+                    cancelToken.onCancel = () => dnsController.abort();
+                }
+                let dnsBatch = { results: new Map(), attempted: 0, resolved: 0, unresolved: [], skipped: [], timedOut: false, cancelled: false };
+                try {
+                    dnsBatch = await resolveHostCnames(Array.from(hostSet), {
+                        concurrency: 6,
+                        maxHosts: 30,
+                        budgetMs: 3500,
+                        timeoutMs: 2000,
+                        signal: dnsController.signal
+                    });
+                } catch (e) {}
+                if (cancelToken) cancelToken.onCancel = null;
+                if (cancelToken?.isCancelled) {
+                    throw new Error("Analysis cancelled");
+                }
+                const dnsInfo = mainHost ? (dnsBatch.results.get(mainHost) || null) : null;
+
+                const mainRemoteIp = metricsResult.connection?.remoteIp || (mainDocumentResponse ? mainDocumentResponse.remoteIPAddress : null);
+                const cdnResult = mainDocumentCaptured
+                    ? detectCdnProvider(rawHeaders, { dnsInfo, remoteIp: mainRemoteIp, hostname: mainHost })
+                    : detectCdnProvider({}, { dnsInfo, hostname: mainHost });
+                if (dnsInfo) {
+                    cdnResult.dns = dnsInfo;
+                }
                 const mainCacheDetails = analyzeCacheDetails(rawHeaders, mainDocumentResponse);
                 const cacheProviderStatus = mainCacheDetails.summary;
 
-                // Per-resource response collection and CDN/Edge detection
                 const resourceEvidenceList = [];
                 for (const [reqId, req] of requests.entries()) {
                     if (!req.url || !/^https?:\/\//i.test(req.url)) continue;
@@ -370,9 +419,15 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress, cancelToken = null) 
                     const remoteIp = req.response?.remoteIPAddress || null;
                     const remotePort = req.response?.remotePort || null;
                     const protocol = req.response?.protocol || null;
-                    const statusCode = req.response?.status || (req.failed ? 0 : 200);
+                    const statusCode = Number.isInteger(req.response?.status) ? req.response.status : null;
+                    let reqHost = '';
+                    try { reqHost = new URL(req.url).hostname.toLowerCase(); } catch (e) {}
+                    const hostDns = dnsBatch.results.get(reqHost) || null;
 
-                    const resourceCdn = detectResourceCdn(cleanHeaders, req.url, req.type, remoteIp, remotePort);
+                    const resourceCdn = detectResourceCdn(cleanHeaders, req.url, req.type, remoteIp, remotePort, {
+                        cnames: hostDns ? hostDns.cnames : [],
+                        dnsInfo: hostDns
+                    });
                     const resourceCacheDetails = analyzeCacheDetails(cleanHeaders, req.response);
                     const resourceCache = resourceCacheDetails.summary;
 
@@ -380,6 +435,7 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress, cancelToken = null) 
                         requestId: reqId,
                         url: req.url,
                         hostname: resourceCdn.hostname,
+                        cnames: hostDns ? hostDns.cnames : [],
                         resourceType: req.type || 'Other',
                         statusCode,
                         protocol,
@@ -397,11 +453,8 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress, cancelToken = null) 
                     });
                 }
 
-                // Group by host to support multi-CDN architectures
                 const hostAnalysis = aggregateHostCdn(resourceEvidenceList, finalUrl);
 
-                // Main document edge evidence
-                const mainRemoteIp = metricsResult.connection?.remoteIp || (mainDocumentResponse ? mainDocumentResponse.remoteIPAddress : null);
                 const mainRemotePort = mainDocumentResponse ? mainDocumentResponse.remotePort : null;
                 const mainEdge = extractEdgeEvidence(rawHeaders, cdnResult.provider, mainRemoteIp, mainRemotePort);
                 cdnResult.edge = mainEdge;
@@ -431,22 +484,39 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress, cancelToken = null) 
                     cacheStatus: cacheProviderStatus,
                     headers: rawHeaders,
                     tls: securityResult.tls,
-                    resourceHighlights: resourcesResult.highlights
+                    resourceHighlights: resourcesResult.highlights,
+                    isHttps: securityResult.isHttps,
+                    mainDocumentCaptured,
+                    contentType: mainDocumentResponse ? (mainDocumentResponse.mimeType || null) : null
                 });
 
                 const documentSource = mainDocumentResponse ? (
                     mainDocumentResponse.fromDiskCache ? 'disk-cache' :
+                    (mainDocumentResponse.fromMemoryCache || mainReq?.servedFromCache) ? 'memory-cache' :
                     mainDocumentResponse.fromServiceWorker ? 'service-worker' :
                     mainDocumentResponse.fromPrefetchCache ? 'prefetch' : 'network'
-                ) : 'network';
+                ) : 'unknown';
+
+                const docBytes = mainReq?.encodedDataLength || (mainDocumentResponse ? (mainDocumentResponse.encodedDataLength || 0) : 0);
+                const docDuration = metricsResult.timing.downloadMs || metricsResult.timing.documentMs;
+                const documentTransferSpeed = calculateTransferSpeed(docBytes, docDuration);
+
+                const totalBytes = resourcesResult.encodedBytes;
+                const totalDuration = metricsResult.timing.loadEventMs || metricsResult.timing.networkIdleMs || metricsResult.timing.documentMs;
+                const pageTransferSpeed = calculateTransferSpeed(totalBytes, totalDuration);
 
                 const finalResult = {
                     schemaVersion: 2,
                     requestedUrl,
                     finalUrl,
-                    statusCode: mainDocumentResponse ? mainDocumentResponse.status : 200,
+                    // Never report HTTP 200 for a response that was not captured.
+                    statusCode: (mainDocumentResponse && Number.isInteger(mainDocumentResponse.status)) ? mainDocumentResponse.status : null,
+                    mainDocumentCaptured,
+                    warnings,
+                    finishReason,
                     timing: metricsResult.timing,
                     connection: metricsResult.connection,
+                    serverTiming: metricsResult.serverTiming || [],
                     transfer: {
                         requestCount: resourcesResult.requestCount,
                         failedRequestCount: resourcesResult.failedRequestCount,
@@ -457,6 +527,10 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress, cancelToken = null) 
                         decodedBytes: resourcesResult.decodedBytes,
                         firstPartyCount: resourcesResult.firstPartyCount,
                         thirdPartyCount: resourcesResult.thirdPartyCount,
+                        documentTransferSpeed,
+                        pageTransferSpeed,
+                        documentTransferSpeedFormatted: formatTransferSpeed(documentTransferSpeed),
+                        pageTransferSpeedFormatted: formatTransferSpeed(pageTransferSpeed),
                         breakdown: resourcesResult.breakdown
                     },
                     highlights: resourcesResult.highlights,
@@ -465,6 +539,14 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress, cancelToken = null) 
                     cdn: cdnResult,
                     cdnByHost: hostAnalysis.byHost,
                     allProviders: hostAnalysis.allProviders,
+                    delivery: hostAnalysis.delivery,
+                    dnsSummary: {
+                        attempted: dnsBatch.attempted,
+                        resolved: dnsBatch.resolved,
+                        unresolved: dnsBatch.unresolved,
+                        skipped: dnsBatch.skipped,
+                        timedOut: dnsBatch.timedOut
+                    },
                     resourceEvidence: resourceEvidenceList,
                     cache: {
                         documentSource,
@@ -492,7 +574,11 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress, cancelToken = null) 
             const now = performance.now();
             lastActivityTime = params.timestamp ? params.timestamp * 1000 : now;
 
-            if (method === 'Page.domContentEventFired') {
+            if (method === 'Page.frameNavigated') {
+                if (params.frame && !params.frame.parentId) {
+                    mainFrameId = params.frame.id;
+                }
+            } else if (method === 'Page.domContentEventFired') {
                 domContentTime = params.timestamp * 1000;
                 notifyProgress("Capturing Network Requests...");
                 if (!domContentCapTimer) {
@@ -509,15 +595,13 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress, cancelToken = null) 
             } else if (method === 'Network.requestWillBeSent') {
                 const reqId = params.requestId;
                 const eventTimeMs = params.timestamp * 1000;
+                const isMainFrameDoc = (params.type === 'Document') && (!mainFrameId || !params.frameId || params.frameId === mainFrameId);
 
-                // BUG-03 FIX: Only assign mainRequestId from Document-type
-                // requests. The old `|| !mainRequestId` fallback caused
-                // favicons, prefetches, and other early requests to steal the
-                // main document slot before the real Document request arrived.
-                if (params.type === 'Document') {
+                if (isMainFrameDoc && (!isMainDocumentLocked || reqId === mainRequestId)) {
                     mainRequestId = reqId;
-                    // BUG-07 FIX: Only anchor navigationStartCDP to the Document
-                    // request so that domContentLoaded/loadEvent deltas are correct.
+                    if (!mainFrameId && params.frameId) {
+                        mainFrameId = params.frameId;
+                    }
                     if (!navigationStartCDP) {
                         navigationStartCDP = eventTimeMs;
                     }
@@ -565,13 +649,11 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress, cancelToken = null) 
                         });
                     }
 
-                    // BUG-02 FIX: If ExtraInfo arrived before this request was
-                    // registered, pull it from the buffer and attach it now.
                     if (extraInfoBuffer.has(reqId)) {
                         entry.rawResponseHeaders = extraInfoBuffer.get(reqId);
                         extraInfoBuffer.delete(reqId);
-                        // Also update the main document ExtraInfo store if applicable.
-                        if (params.type === 'Document') {
+
+                        if (params.type === 'Document' && (reqId === mainRequestId || isMainFrameDoc)) {
                             mainExtraHeadersStore = entry.rawResponseHeaders;
                         }
                     }
@@ -586,11 +668,16 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress, cancelToken = null) 
                     reqData.response = params.response;
                     reqData.responseReceivedTime = params.timestamp * 1000;
                 }
-                if (reqId === mainRequestId || (params.type === 'Document' && !mainDocumentResponse)) {
+                const isMainDocReq = (reqId === mainRequestId) || (!mainDocumentResponse && params.type === 'Document' && (!mainFrameId || !params.frameId || params.frameId === mainFrameId));
+                if (isMainDocReq && !isMainDocumentLocked) {
                     mainRequestId = reqId;
                     mainDocumentResponse = params.response;
                     if (params.response && params.response.url) {
                         finalUrl = params.response.url;
+                    }
+                    const status = params.response?.status || 200;
+                    if (status < 300 || status >= 400) {
+                        isMainDocumentLocked = true;
                     }
                 }
 
@@ -599,15 +686,13 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress, cancelToken = null) 
                 const reqData = requests.get(reqId);
 
                 if (reqData) {
-                    // Request entry exists — attach headers directly.
+
                     reqData.rawResponseHeaders = params.headers || null;
-                    if (reqId === mainRequestId || reqData.type === 'Document') {
+                    if (reqId === mainRequestId) {
                         mainExtraHeadersStore = params.headers || null;
                     }
                 } else {
-                    // BUG-02 FIX: requestWillBeSent has not fired yet for this
-                    // requestId. Buffer the headers — they will be merged when
-                    // requestWillBeSent fires (above) or at finishAnalysis.
+
                     if (params.headers) {
                         extraInfoBuffer.set(reqId, params.headers);
                     }
@@ -636,22 +721,24 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress, cancelToken = null) 
                 const reqId = params.requestId;
                 const reqData = requests.get(reqId);
                 if (reqData) {
-                    // Distinguish user/browser cancelled requests from network failures
+
                     const isCanceled = Boolean(params.canceled || params.errorText === 'net::ERR_ABORTED');
                     reqData.canceled = isCanceled;
+                    reqData.errorText = params.errorText || null;
+                    if (reqId === mainRequestId && !mainDocumentResponse && !isCanceled && params.errorText) {
+                        mainDocumentErrorText = params.errorText;
+                    }
 
                     if (isCanceled) {
-                        // Benign browser-cancelled request — not an unexpected failure.
+
                         reqData.failed = false;
                     } else {
                         const existingStatus = reqData.response ? reqData.response.status : null;
                         if (existingStatus !== null && existingStatus < 400) {
-                            // A valid HTTP response was already received — this loadingFailed
-                            // is for a resource that completed (e.g. SSE stream closed, media
-                            // range request). Do not count as failed.
+
                             reqData.failed = false;
                         } else {
-                            // Genuine network failure with no prior successful response.
+
                             reqData.failed = true;
                         }
                     }
@@ -670,7 +757,13 @@ function captureCdpEvents(tabId, targetUrl, notifyProgress, cancelToken = null) 
 
             notifyProgress("Navigating to Target Site...");
             mainNavigationStart = performance.now();
-            await cdpSend(tabId, "Page.navigate", { url: targetUrl });
+            const navResult = await cdpSend(tabId, "Page.navigate", { url: targetUrl });
+            if (navResult && navResult.frameId) {
+                mainFrameId = navResult.frameId;
+            }
+            if (navResult && navResult.errorText && !mainDocumentResponse) {
+                mainDocumentErrorText = navResult.errorText;
+            }
         } catch (err) {
             if (cancelToken?.isCancelled) {
                 abortAnalysis(new Error("Analysis cancelled"));

@@ -1,15 +1,3 @@
-/**
- * CDN Analyzer Pro v2 - Performance Scoring & Suggestions Module
- * Performance Score v2.0 Algorithm & Optimization Recommendations
- *
- * FIXES APPLIED:
- *  BUG-21: calculatePerformanceScore now handles null ttfb and null loadTime
- *          (produced by metrics.js after BUG-09/10 fixes). Previously a null
- *          value started the component at 0 (full penalty). Now null means
- *          "not measured" and yields a neutral score of 50 for that component
- *          so the overall score is not unfairly penalised for missing data.
- */
-
 export function calculatePerformanceScore(ctx) {
     const {
         isHttps,
@@ -20,7 +8,6 @@ export function calculatePerformanceScore(ctx) {
         protocol = 'Unknown'
     } = (ctx || {});
 
-    // Guard all timing inputs against undefined, NaN, and negative values
     const loadTime = (timing && Number.isFinite(timing.loadEventMs) && timing.loadEventMs >= 0)
         ? timing.loadEventMs
         : ((timing && Number.isFinite(timing.documentMs) && timing.documentMs >= 0) ? timing.documentMs : null);
@@ -29,7 +16,6 @@ export function calculatePerformanceScore(ctx) {
         ? timing.ttfbMs
         : null;
 
-    // 1. Page Load Score (Weight: 35) - only scored when measurement is available
     let pageLoadScore = null;
     if (loadTime !== null) {
         if (loadTime > 3500) pageLoadScore = 40;
@@ -39,7 +25,6 @@ export function calculatePerformanceScore(ctx) {
         else pageLoadScore = 100;
     }
 
-    // 2. TTFB Score (Weight: 25) - only scored when measurement is available
     let ttfbScore = null;
     if (ttfb !== null) {
         if (ttfb > 800) ttfbScore = 30;
@@ -48,25 +33,31 @@ export function calculatePerformanceScore(ctx) {
         else ttfbScore = 100;
     }
 
-    // 3. Cache Score (Weight: 20) - only scored when cache evidence is available
+    const CACHE_SCORES = {
+        'HIT': 100,
+        'REVALIDATED': 85,
+        'Cacheable': 75,
+        'Service Worker': 75,
+        'Memory Cache': 75,
+        'Disk Cache': 75,
+        'STALE': 70,
+        'BYPASS': 60,
+        'EXPIRED': 60,
+        'Private Cacheable': 60,
+        'Revalidate Required': 60,
+        'DYNAMIC': 55,
+        'MISS': 50,
+        'Not Cacheable': 50,
+        'No Cache Headers': 40
+    };
     let cacheScore = null;
     const normCache = (typeof cacheStatus === 'string' && cacheStatus) ? cacheStatus : 'Unknown';
-    if (normCache !== 'Unknown') {
-        if (normCache.includes('HIT')) cacheScore = 100;
-        else if (normCache.includes('REVALIDATED')) cacheScore = 85;
-        else if (normCache.includes('Cacheable')) cacheScore = 75;
-        else if (normCache.includes('BYPASS') || normCache.includes('DYNAMIC')) cacheScore = 60;
-        else if (normCache.includes('MISS')) cacheScore = 50;
-        else if (normCache.includes('Not Cacheable')) cacheScore = 50;
-        else if (normCache === 'No Cache Headers') cacheScore = 40;
-        else cacheScore = 50;
+    if (normCache !== 'Unknown' && normCache !== 'UNKNOWN') {
+        cacheScore = CACHE_SCORES[normCache] ?? 50;
     }
 
-    // 4. Compression Score (Weight: 10)
-    // Only scored if compression was observed (either explicitly passed in ctx.compression,
-    // or via content-encoding in headers). If unobserved / missing, do NOT penalize.
     let compressionScore = null;
-    let compressionVal = ctx.compression;
+    let compressionVal = ctx ? ctx.compression : undefined;
     if (!compressionVal && headers && typeof headers === 'object') {
         if ('content-encoding' in headers || 'Content-Encoding' in headers) {
             compressionVal = headers['content-encoding'] || headers['Content-Encoding'];
@@ -81,13 +72,11 @@ export function calculatePerformanceScore(ctx) {
         }
     }
 
-    // 5. Basic Security Score (Weight: 10) - kept conceptually separate in results
     const hasHttps = Boolean(isHttps);
     const hasHSTS = Boolean(headers && (headers['strict-transport-security'] || headers['Strict-Transport-Security']));
     const hasCSP = Boolean(headers && (headers['content-security-policy'] || headers['Content-Security-Policy']));
     const basicSecurityScore = (hasHttps ? 40 : 0) + (hasHSTS ? 30 : 0) + (hasCSP ? 30 : 0);
 
-    // Dynamic reweighting across applicable components so missing data is never penalized
     let totalWeight = 0;
     let weightedSum = 0;
 
@@ -107,7 +96,7 @@ export function calculatePerformanceScore(ctx) {
         weightedSum += compressionScore * 0.10;
         totalWeight += 0.10;
     }
-    // Security check is applicable whenever security metadata is provided
+
     if (isHttps !== undefined && isHttps !== null) {
         weightedSum += basicSecurityScore * 0.10;
         totalWeight += 0.10;
@@ -118,7 +107,7 @@ export function calculatePerformanceScore(ctx) {
         penalty = Math.min(20, Math.max(0, failedRequestCount * 5));
     }
 
-    let rawScore = 75; // Neutral baseline if no applicable components
+    let rawScore = 75; 
     if (totalWeight > 0) {
         rawScore = (weightedSum / totalWeight) - penalty;
     }
@@ -133,83 +122,116 @@ export function calculatePerformanceScore(ctx) {
     else if (overallScore >= 60) grade = 'D';
     else grade = 'F';
 
+    const applicableComponents = {
+        pageLoad: pageLoadScore !== null,
+        ttfb: ttfbScore !== null,
+        cache: cacheScore !== null,
+        compression: compressionScore !== null,
+        basicSecurity: isHttps !== undefined && isHttps !== null
+    };
+    const missingComponents = Object.entries(applicableComponents)
+        .filter(([, ok]) => !ok)
+        .map(([name]) => name);
+    const completeness = Math.round(totalWeight * 100) / 100;
+
     return {
         score: overallScore,
         grade,
-        scoreVersion: "2.1",
-        completeness: Math.round(totalWeight * 100) / 100,
+        scoreVersion: "2.2",
+        completeness,
+        insufficientData: completeness < 0.5,
+        missingComponents,
+        failedRequestPenalty: penalty,
         securityScore: basicSecurityScore,
+        // Missing measurements are null (not a neutral 50) so reports never show invented values.
         components: {
-            pageLoad: pageLoadScore ?? 50,
-            ttfb: ttfbScore ?? 50,
-            cache: cacheScore ?? 50,
-            compression: compressionScore ?? 50,
-            basicSecurity: basicSecurityScore
+            pageLoad: pageLoadScore,
+            ttfb: ttfbScore,
+            cache: cacheScore,
+            compression: compressionScore,
+            basicSecurity: applicableComponents.basicSecurity ? basicSecurityScore : null
         },
-        applicableComponents: {
-            pageLoad: pageLoadScore !== null,
-            ttfb: ttfbScore !== null,
-            cache: cacheScore !== null,
-            compression: compressionScore !== null,
-            basicSecurity: isHttps !== undefined && isHttps !== null
-        }
+        weights: { pageLoad: 0.35, ttfb: 0.25, cache: 0.20, compression: 0.10, basicSecurity: 0.10 },
+        applicableComponents
     };
 }
 
 export function generateSuggestions(ctx) {
-    const { targetUrl, cdnResult, timing, cacheStatus, headers = {}, tls, resourceHighlights } = ctx;
+    const {
+        cdnResult,
+        timing = {},
+        cacheStatus,
+        headers = {},
+        resourceHighlights,
+        isHttps = null,
+        mainDocumentCaptured = true,
+        contentType = null
+    } = ctx || {};
     const suggestions = [];
 
     const normHeaders = {};
-    for (const [k, v] of Object.entries(headers)) {
+    for (const [k, v] of Object.entries(headers || {})) {
         normHeaders[k.toLowerCase()] = String(v);
     }
 
-    // 1. CDN Optimization
-    const provider = cdnResult?.provider || "Not Detected";
-    if (provider === "Not Detected" || provider === "Unknown / not detected" || provider === "Unknown") {
+    if (!mainDocumentCaptured) {
         suggestions.push({
-            title: "Route Traffic Through Edge CDN Network",
-            type: "high",
-            desc: "No major Content Delivery Network edge headers were detected. Serving assets directly from an origin server increases TTFB and latency for global visitors."
+            title: "Main Document Response Not Captured",
+            type: "medium",
+            desc: "The page's main HTML response was not observed, so CDN, cache, compression and header checks for the document could not be evaluated. Re-run the analysis; if it persists, the site may block automated loads or redirect to a non-HTTP scheme."
+        });
+        return suggestions;
+    }
+
+    const provider = cdnResult?.provider || "Not Detected";
+    const status = cdnResult?.status || (provider === "Not Detected" ? 'unidentified' : 'identified');
+    if (status === 'unidentified') {
+        suggestions.push({
+            title: "No CDN Signature Identified",
+            type: "low",
+            desc: "No provider-specific CDN headers, CNAME alias or published edge IP range were observed for the main document. This does not prove the page is served directly from origin — some CDNs hide identifying headers. If you operate this site and it is not behind a CDN, an edge network can reduce latency for distant visitors."
+        });
+    } else if (status === 'network-only') {
+        suggestions.push({
+            title: "CDN Product Not Confirmed",
+            type: "low",
+            desc: `The response came from ${provider} network infrastructure, but no product-specific header confirmed which CDN service (if any) is in use.`
         });
     }
 
-    // 2. Cache Optimization
     if (cacheStatus && (cacheStatus.includes('MISS') || cacheStatus === 'No Cache Headers')) {
         suggestions.push({
             title: "Improve Edge Cache Hit Ratio",
             type: "medium",
-            desc: "The primary document response returned a Cache MISS status or lacks caching headers. Ensure Cache-Control edge directives allow proxy caching for static content."
+            desc: "The main document returned a cache MISS or has no caching headers. If this content is shareable, allow shared caching with Cache-Control (for example s-maxage) so edge caches can serve it."
         });
     }
 
-    // 3. Compression Optimization
+    const ct = String(contentType || normHeaders['content-type'] || '').toLowerCase();
+    const isText = !ct || /text\/|json|javascript|xml|svg/.test(ct);
     const encoding = (normHeaders['content-encoding'] || '').toLowerCase();
-    const hasCompression = encoding.includes('gzip') || encoding.includes('br') || encoding.includes('deflate') || encoding.includes('zstd');
-    if (!hasCompression) {
+    const hasCompression = /gzip|br|deflate|zstd/.test(encoding);
+    if (isText && !hasCompression) {
         suggestions.push({
-            title: "Enable Modern HTTP Text Compression (Brotli / Gzip)",
+            title: "Enable HTTP Text Compression (Brotli / Gzip)",
             type: "high",
-            desc: "The server delivered text content without Brotli or Gzip encoding. Enabling compression can reduce HTML, JS, and CSS payload sizes by 60%–80%."
+            desc: "The main document was delivered without Brotli, Gzip or Zstandard encoding. Compressing HTML, JS and CSS typically reduces their transfer size substantially."
         });
     }
 
-    // 4. TTFB Optimization
-    if (timing.ttfbMs && timing.ttfbMs > 400) {
+    if (Number.isFinite(timing.ttfbMs) && timing.ttfbMs > 400) {
         suggestions.push({
-            title: "Optimize Origin Server Response Time (TTFB)",
+            title: "Reduce Server Response Time (TTFB)",
             type: "high",
-            desc: `Time to First Byte was measured at ${timing.ttfbMs}ms. Consider optimizing database queries, server-side caching, or upgrading origin server specs.`
+            desc: `Waiting for the server response took ${Math.round(timing.ttfbMs)} ms. Review server-side processing, application caching, or edge caching for this document.`
         });
     }
 
-    // 5. Security Header Recommendations
-    if (!normHeaders['strict-transport-security']) {
+    if (isHttps !== false && !normHeaders['strict-transport-security']) {
         suggestions.push({
             title: "Enable HTTP Strict Transport Security (HSTS)",
             type: "low",
-            desc: "Missing Strict-Transport-Security header. HSTS forces browsers to establish HTTPS connections automatically, preventing downgrade attacks."
+            desc: "Missing Strict-Transport-Security header. HSTS makes browsers use HTTPS automatically and prevents protocol downgrade."
         });
     }
 
@@ -217,24 +239,24 @@ export function generateSuggestions(ctx) {
         suggestions.push({
             title: "Implement Content Security Policy (CSP)",
             type: "medium",
-            desc: "Missing Content-Security-Policy header. CSP restricts unauthorized scripts and mitigates cross-site scripting (XSS) vulnerabilities."
+            desc: "Missing Content-Security-Policy header. CSP restricts which scripts may run and mitigates cross-site scripting (XSS)."
         });
     }
 
-    // 6. Resource Optimization
     if (resourceHighlights && resourceHighlights.slowestResource && resourceHighlights.slowestResource.durationMs > 1000) {
+        const url = String(resourceHighlights.slowestResource.url || '');
         suggestions.push({
             title: "Optimize Slowest Network Resource",
             type: "medium",
-            desc: `The request for ${resourceHighlights.slowestResource.url.slice(0, 60)}... took ${resourceHighlights.slowestResource.durationMs}ms to load.`
+            desc: `The request for ${url.length > 60 ? url.slice(0, 60) + '…' : url} took ${resourceHighlights.slowestResource.durationMs} ms to load.`
         });
     }
 
     if (suggestions.length === 0) {
         suggestions.push({
-            title: "Excellent Network & Delivery Setup",
+            title: "No Issues Found in Checked Areas",
             type: "good",
-            desc: "All major CDN, cache, compression, security header, and latency checks passed optimal performance thresholds."
+            desc: "CDN evidence, cache, compression, security header and latency checks found nothing to improve for the main document."
         });
     }
 

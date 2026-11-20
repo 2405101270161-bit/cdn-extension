@@ -1,13 +1,7 @@
-/**
- * CDN Analyzer Pro v2 - Core Engine (Service Worker Orchestrator)
- * Single-pass CDP Background Tab Analysis Engine with complete reset & isolation.
- */
-
 import { executeCdpAnalysis, sanitizeErrorMessage } from './modules/cdp.js';
 export { sanitizeErrorMessage };
 
-const ANALYSIS_STATE_KEY = 'cdnAnalyzerAnalysisState';
-const LEGACY_STORAGE_KEYS = [
+const STORAGE_CLEANUP_KEYS = [
     'cdnAnalyzerAnalysisState',
     'lastAnalysis',
     'cachedReport',
@@ -29,7 +23,6 @@ let currentAnalysisState = {
 };
 let currentAnalysisId = 0;
 
-// Clear stale analysis data whenever the extension initializes or updates
 chrome.runtime.onInstalled.addListener(() => {
     clearAnalysisState().catch(() => {});
 });
@@ -40,32 +33,32 @@ chrome.runtime.onStartup.addListener(() => {
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === 'START_ANALYSIS') {
-        startTrackedAnalysis(request).then(sendResponse);
-        return true; // Keep IPC channel open for async response
+        startTrackedAnalysis(request)
+            .then(sendResponse)
+            .catch(err => sendResponse({ success: false, error: err.message || "Failed to start analysis." }));
+        return true;
     }
     if (request.action === 'GET_ANALYSIS_STATE') {
-        getStoredAnalysisState().then(state => sendResponse({ state }));
+        getStoredAnalysisState()
+            .then(state => sendResponse({ state }))
+            .catch(err => sendResponse({ state: { status: 'idle' }, error: err.message }));
         return true;
     }
     if (request.action === 'CLEAR_ANALYSIS_STATE') {
-        clearAnalysisState().then(() => sendResponse({ success: true }));
+        clearAnalysisState(true)
+            .then(() => sendResponse({ success: true }))
+            .catch(err => sendResponse({ success: false, error: err.message }));
         return true;
     }
 });
 
-/**
- * Centralized, idempotent reset mechanism that cancels active analyses,
- * purges memory references, cleans analysis storage keys, and notifies listeners.
- */
-export async function clearAnalysisState() {
+export async function clearAnalysisState(notify = true) {
     currentAnalysisId++;
 
     if (activeCancelToken) {
         try {
             activeCancelToken.cancel();
-        } catch (err) {
-            console.warn("[CDP Engine v2] Error during cancel token abort:", err);
-        }
+        } catch (err) {}
         activeCancelToken = null;
     }
 
@@ -81,37 +74,31 @@ export async function clearAnalysisState() {
         updatedAt: new Date().toISOString()
     };
 
-    // Purge session storage keys
     try {
         if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.session) {
-            await chrome.storage.session.remove(LEGACY_STORAGE_KEYS).catch(() => {});
+            await chrome.storage.session.remove(STORAGE_CLEANUP_KEYS).catch(() => {});
         }
     } catch (e) {}
 
-    // Purge local storage analysis keys if any legacy ones exist
     try {
         if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-            await chrome.storage.local.remove(LEGACY_STORAGE_KEYS).catch(() => {});
+            await chrome.storage.local.remove(STORAGE_CLEANUP_KEYS).catch(() => {});
         }
     } catch (e) {}
 
-    // Purge sync storage analysis keys if any legacy ones exist
     try {
         if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.sync) {
-            await chrome.storage.sync.remove(LEGACY_STORAGE_KEYS).catch(() => {});
+            await chrome.storage.sync.remove(STORAGE_CLEANUP_KEYS).catch(() => {});
         }
     } catch (e) {}
 
-    // Notify any open views that state has been cleared
-    try {
-        chrome.runtime.sendMessage({ action: 'ANALYSIS_STATE_CLEARED' }).catch(() => {});
-    } catch (e) {}
+    if (notify) {
+        try {
+            chrome.runtime.sendMessage({ action: 'ANALYSIS_STATE_CLEARED' }).catch(() => {});
+        } catch (e) {}
+    }
 }
 
-/**
- * Starts a strictly tracked analysis session with generation isolation.
- * Automatically invalidates and safely cleans up any previous or pending analysis.
- */
 export async function startTrackedAnalysis(options) {
     const rawUrl = options?.url ? String(options.url).trim() : '';
     if (!rawUrl) {
@@ -121,7 +108,6 @@ export async function startTrackedAnalysis(options) {
         };
     }
 
-    // Step 4.1: Validate target URL using the URL parser
     let normalizedUrl;
     try {
         let candidate = rawUrl;
@@ -147,16 +133,8 @@ export async function startTrackedAnalysis(options) {
         };
     }
 
-    // Invalidate and cancel previous analysis before starting a new one
-    if (activeCancelToken || activeAnalysisPromise) {
-        console.warn("[CDP Engine v2] Cancelling pending analysis to start fresh run.");
-        await clearAnalysisState();
-    } else {
-        // Clear previous analysis results so this run starts completely fresh
-        await clearAnalysisState();
-    }
+    await clearAnalysisState(false);
 
-    // Step 4.2: Create a unique analysis ID and generation token
     const thisRunGeneration = ++currentAnalysisId;
     const thisAnalysisId = options?.analysisId || (`analysis_${Date.now()}_${thisRunGeneration}_${Math.random().toString(36).slice(2, 7)}`);
     const cancelToken = {
@@ -167,9 +145,7 @@ export async function startTrackedAnalysis(options) {
             if (this.isCancelled) return;
             this.isCancelled = true;
             if (typeof this.onCancel === 'function') {
-                try {
-                    this.onCancel();
-                } catch (err) {}
+                try { this.onCancel(); } catch (err) {}
             }
             if (this.tabId) {
                 const tid = this.tabId;
@@ -193,13 +169,6 @@ export async function startTrackedAnalysis(options) {
         updatedAt: startedAt
     };
 
-    // Record running state in session storage in case the worker idles
-    try {
-        if (chrome.storage && chrome.storage.session) {
-            await chrome.storage.session.set({ [ANALYSIS_STATE_KEY]: currentAnalysisState }).catch(() => {});
-        }
-    } catch (e) {}
-
     const notifyProgress = (stepMessage) => {
         if (currentAnalysisId !== thisRunGeneration || cancelToken.isCancelled) return;
         currentAnalysisState = {
@@ -208,11 +177,6 @@ export async function startTrackedAnalysis(options) {
             progress: stepMessage,
             updatedAt: new Date().toISOString()
         };
-        try {
-            if (chrome.storage && chrome.storage.session) {
-                chrome.storage.session.set({ [ANALYSIS_STATE_KEY]: currentAnalysisState }).catch(() => {});
-            }
-        } catch (e) {}
         chrome.runtime.sendMessage({
             action: 'ANALYSIS_PROGRESS',
             analysisId: thisAnalysisId,
@@ -225,7 +189,6 @@ export async function startTrackedAnalysis(options) {
     try {
         const response = await activeAnalysisPromise;
 
-        // Discard result if superseded or cancelled during execution
         if (currentAnalysisId !== thisRunGeneration || cancelToken.isCancelled) {
             return {
                 success: false,
@@ -237,39 +200,47 @@ export async function startTrackedAnalysis(options) {
         if (response.success) {
             currentAnalysisState = {
                 analysisId: thisAnalysisId,
-                status: 'completed',
-                progress: 'Analysis complete',
-                result: response.data,
-                error: null,
-                startedAt,
-                updatedAt: new Date().toISOString()
-            };
-        } else {
-            currentAnalysisState = {
-                analysisId: thisAnalysisId,
-                status: response.cancelled ? 'cancelled' : 'failed',
+                status: 'idle',
                 progress: null,
                 result: null,
-                error: sanitizeErrorMessage(response.error || (response.cancelled ? "Analysis was cancelled." : "Analysis failed.")),
-                startedAt,
+                error: null,
+                startedAt: null,
                 updatedAt: new Date().toISOString()
             };
+
+            chrome.runtime.sendMessage({
+                action: 'ANALYSIS_STATE_UPDATED',
+                analysisId: thisAnalysisId,
+                state: {
+                    status: 'completed',
+                    result: response.data
+                }
+            }).catch(() => {});
+
+            return { ...response, analysisId: thisAnalysisId };
+        } else {
+            const errText = sanitizeErrorMessage(response.error || (response.cancelled ? "Analysis was cancelled." : "Analysis failed."));
+            currentAnalysisState = {
+                analysisId: thisAnalysisId,
+                status: 'idle',
+                progress: null,
+                result: null,
+                error: errText,
+                startedAt: null,
+                updatedAt: new Date().toISOString()
+            };
+
+            chrome.runtime.sendMessage({
+                action: 'ANALYSIS_STATE_UPDATED',
+                analysisId: thisAnalysisId,
+                state: {
+                    status: response.cancelled ? 'cancelled' : 'failed',
+                    error: errText
+                }
+            }).catch(() => {});
+
+            return { ...response, analysisId: thisAnalysisId };
         }
-
-        // Persist final state in session storage so reopening popup displays it
-        try {
-            if (chrome.storage && chrome.storage.session) {
-                await chrome.storage.session.set({ [ANALYSIS_STATE_KEY]: currentAnalysisState }).catch(() => {});
-            }
-        } catch (e) {}
-
-        chrome.runtime.sendMessage({
-            action: 'ANALYSIS_STATE_UPDATED',
-            analysisId: thisAnalysisId,
-            state: currentAnalysisState
-        }).catch(() => {});
-
-        return { ...response, analysisId: thisAnalysisId };
 
     } catch (err) {
         if (currentAnalysisId !== thisRunGeneration || cancelToken.isCancelled) {
@@ -280,25 +251,29 @@ export async function startTrackedAnalysis(options) {
             };
         }
 
+        const errText = sanitizeErrorMessage(err.message || "Analysis failed unexpectedly.");
         currentAnalysisState = {
             analysisId: thisAnalysisId,
-            status: 'failed',
+            status: 'idle',
             progress: null,
             result: null,
-            error: sanitizeErrorMessage(err.message || "Analysis failed unexpectedly."),
-            startedAt,
+            error: errText,
+            startedAt: null,
             updatedAt: new Date().toISOString()
         };
 
-        try {
-            if (chrome.storage && chrome.storage.session) {
-                await chrome.storage.session.set({ [ANALYSIS_STATE_KEY]: currentAnalysisState }).catch(() => {});
+        chrome.runtime.sendMessage({
+            action: 'ANALYSIS_STATE_UPDATED',
+            analysisId: thisAnalysisId,
+            state: {
+                status: 'failed',
+                error: errText
             }
-        } catch (e) {}
+        }).catch(() => {});
 
         return {
             success: false,
-            error: currentAnalysisState.error,
+            error: errText,
             analysisId: thisAnalysisId
         };
 
@@ -310,77 +285,25 @@ export async function startTrackedAnalysis(options) {
     }
 }
 
-/**
- * Returns the currently running analysis state, or null if idle.
- * Preserves completed results for popup reopens, and marks service-worker suspended runs failed.
- */
 export async function getStoredAnalysisState() {
-    // 1. In-memory check
-    if (currentAnalysisState && currentAnalysisState.status !== 'idle') {
-        if (currentAnalysisState.status === 'running') {
-            if (!activeAnalysisPromise) {
-                const failedState = {
-                    ...currentAnalysisState,
-                    status: 'failed',
-                    error: "Analysis was interrupted by service worker suspension. Please try again.",
-                    updatedAt: new Date().toISOString()
-                };
-                currentAnalysisState = failedState;
-                try {
-                    if (chrome.storage && chrome.storage.session) {
-                        await chrome.storage.session.set({ [ANALYSIS_STATE_KEY]: failedState }).catch(() => {});
-                    }
-                } catch (e) {}
-                return currentAnalysisState;
-            }
-
-            const elapsed = Date.now() - new Date(currentAnalysisState.startedAt).getTime();
-            if (elapsed > 15000) {
-                console.warn("[CDP Engine v2] Running analysis exceeded 15s timeout ceiling. Resetting.");
-                await clearAnalysisState();
-                return null;
-            }
+    if (currentAnalysisState && currentAnalysisState.status === 'running') {
+        if (!activeAnalysisPromise) {
+            currentAnalysisState = {
+                ...currentAnalysisState,
+                status: 'failed',
+                error: "Analysis was interrupted by service worker suspension. Please try again.",
+                updatedAt: new Date().toISOString()
+            };
             return currentAnalysisState;
+        }
+
+        const elapsed = Date.now() - new Date(currentAnalysisState.startedAt).getTime();
+        if (elapsed > 30000) {
+            await clearAnalysisState();
+            return null;
         }
         return currentAnalysisState;
     }
-
-    // 2. Storage recovery check (when in-memory state is idle or uninitialized after service worker suspension / restart)
-    try {
-        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.session) {
-            const stored = await chrome.storage.session.get(ANALYSIS_STATE_KEY).catch(() => ({}));
-            const state = stored[ANALYSIS_STATE_KEY] || null;
-            if (state) {
-                if (state.status === 'idle') {
-                    return null;
-                }
-                if (state.status === 'running') {
-                    // Service worker restarted while analysis was running: in-memory promise is gone
-                    if (!activeAnalysisPromise) {
-                        console.warn("[CDP Engine v2] Service worker restarted while analysis was running. Marking failed.");
-                        const failedState = {
-                            ...state,
-                            status: 'failed',
-                            error: "Analysis was interrupted by service worker suspension. Please try again.",
-                            updatedAt: new Date().toISOString()
-                        };
-                        currentAnalysisState = failedState;
-                        await chrome.storage.session.set({ [ANALYSIS_STATE_KEY]: failedState }).catch(() => {});
-                        return currentAnalysisState;
-                    }
-                    const elapsed = Date.now() - new Date(state.startedAt).getTime();
-                    if (elapsed > 15000) {
-                        await clearAnalysisState();
-                        return null;
-                    }
-                    currentAnalysisState = state;
-                    return currentAnalysisState;
-                }
-                currentAnalysisState = state;
-                return currentAnalysisState;
-            }
-        }
-    } catch (e) {}
 
     return null;
 }

@@ -1,9 +1,3 @@
-/**
- * Test Suite: Cache Analysis
- * Verifies distinction between Browser Cache, Service Worker responses,
- * CDN edge cache states (HIT, MISS, BYPASS), and Cache Policy.
- */
-
 import assert from 'node:assert';
 import { analyzeCacheDetails, extractCacheStatus } from '../modules/cdn.js';
 
@@ -27,7 +21,6 @@ function test(name, fn) {
     }
 }
 
-// 1. Browser Disk Cache evidence
 test("Browser disk cache evidence identified without false CDN HIT attribution", () => {
     const res = analyzeCacheDetails({
         'content-type': 'text/html; charset=UTF-8',
@@ -44,7 +37,6 @@ test("Browser disk cache evidence identified without false CDN HIT attribution",
     assert.strictEqual(res.summary, 'Disk Cache');
 });
 
-// 2. Browser Memory Cache evidence
 test("Browser memory cache evidence identified from CDP flags", () => {
     const res = analyzeCacheDetails({
         'content-type': 'application/javascript'
@@ -60,7 +52,6 @@ test("Browser memory cache evidence identified from CDP flags", () => {
     assert.strictEqual(res.summary, 'Memory Cache');
 });
 
-// 3. Service Worker fulfilled response
 test("Service worker fulfilled response is not classified as CDN cache HIT", () => {
     const res = analyzeCacheDetails({
         'content-type': 'text/html'
@@ -75,7 +66,6 @@ test("Service worker fulfilled response is not classified as CDN cache HIT", () 
     assert.strictEqual(res.summary, 'Service Worker');
 });
 
-// 4. CDN Cache HIT
 test("CDN cache HIT extracted from provider headers", () => {
     const cf = analyzeCacheDetails({ 'cf-cache-status': 'HIT' });
     assert.strictEqual(cf.cdnCache.status, 'HIT');
@@ -94,7 +84,6 @@ test("CDN cache HIT extracted from provider headers", () => {
     assert.strictEqual(hits.cdnCache.status, 'HIT');
 });
 
-// 5. CDN Cache MISS
 test("CDN cache MISS extracted from provider headers", () => {
     const cf = analyzeCacheDetails({ 'cf-cache-status': 'MISS' });
     assert.strictEqual(cf.cdnCache.status, 'MISS');
@@ -111,18 +100,16 @@ test("CDN cache MISS extracted from provider headers", () => {
     assert.strictEqual(hits.cdnCache.status, 'MISS');
 });
 
-// 6. CDN Cache BYPASS and DYNAMIC
 test("CDN cache BYPASS and DYNAMIC statuses extracted", () => {
     const cfBypass = analyzeCacheDetails({ 'cf-cache-status': 'BYPASS' });
     assert.strictEqual(cfBypass.cdnCache.status, 'BYPASS');
     assert.strictEqual(cfBypass.summary, 'BYPASS');
 
     const cfDynamic = analyzeCacheDetails({ 'cf-cache-status': 'DYNAMIC' });
-    assert.strictEqual(cfDynamic.cdnCache.status, 'BYPASS');
-    assert.strictEqual(cfDynamic.summary, 'BYPASS');
+    assert.strictEqual(cfDynamic.cdnCache.status, 'DYNAMIC', "DYNAMIC is distinct from BYPASS");
+    assert.strictEqual(cfDynamic.summary, 'DYNAMIC');
 });
 
-// 7. CDN Cache EXPIRED, REVALIDATED, and STALE
 test("CDN cache EXPIRED, REVALIDATED, and STALE statuses preserved", () => {
     const expired = analyzeCacheDetails({ 'cf-cache-status': 'EXPIRED' });
     assert.strictEqual(expired.cdnCache.status, 'EXPIRED');
@@ -137,7 +124,6 @@ test("CDN cache EXPIRED, REVALIDATED, and STALE statuses preserved", () => {
     assert.strictEqual(refreshHit.cdnCache.status, 'REVALIDATED');
 });
 
-// 8. Cache-Control policy distinction
 test("Cache-Control policy declares cacheability, not proof of CDN cache hit", () => {
     const cacheablePolicy = analyzeCacheDetails({
         'cache-control': 'public, max-age=86400, s-maxage=604800'
@@ -153,7 +139,6 @@ test("Cache-Control policy declares cacheability, not proof of CDN cache hit", (
     assert.strictEqual(uncacheablePolicy.summary, 'Not Cacheable');
 });
 
-// 9. Age header alone without CDN cache status
 test("Age header indicates proxy transit duration, not CDN edge cache status", () => {
     const ageResp = analyzeCacheDetails({
         'age': '300',
@@ -164,7 +149,6 @@ test("Age header indicates proxy transit duration, not CDN edge cache status", (
     assert.strictEqual(ageResp.policy.status, 'Cacheable');
 });
 
-// 10. Unknown cache status
 test("Ambiguous or uninformative headers report Unknown", () => {
     const unk = analyzeCacheDetails({
         'pragma': 'no-cache'
@@ -173,7 +157,6 @@ test("Ambiguous or uninformative headers report Unknown", () => {
     assert.strictEqual(unk.summary, 'Unknown');
 });
 
-// 11. No cache headers at all
 test("Response with no cache-related headers reports No Cache Headers", () => {
     const none = analyzeCacheDetails({
         'server': 'nginx',

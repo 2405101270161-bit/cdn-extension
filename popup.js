@@ -1,11 +1,7 @@
-import { generateMarkdownReport, generateSanitizedJsonReport } from './modules/report.js';
-
 function initPopup() {
     const urlInput = document.getElementById('urlInput');
     const analyzeBtn = document.getElementById('analyzeBtn');
     const refreshBtn = document.getElementById('refreshBtn');
-    const copyReportBtn = document.getElementById('copyReportBtn');
-    const exportJsonBtn = document.getElementById('exportJsonBtn');
     const resultsArea = document.getElementById('resultsArea');
     const clearBtn = document.getElementById('clearBtn');
     const searchField = document.getElementById('searchField');
@@ -29,8 +25,6 @@ function initPopup() {
     let currentAnalysisId = null;
 
     restoreAnalysisState();
-
-    /* ---------------- input handling (same validation contract) ---------------- */
 
     urlInput.addEventListener('input', () => {
         const value = urlInput.value.trim();
@@ -81,8 +75,6 @@ function initPopup() {
         urlHint.className = 'field-hint' + (tone ? ' ' + tone : '');
     }
 
-    /* ---------------- reset ---------------- */
-
     function resetToHomeState() {
         stopStepCycle();
         lastAnalysisData = null;
@@ -93,55 +85,6 @@ function initPopup() {
         setRefreshingState(false);
         setHomeMode(true);
         updateFieldUI();
-    }
-
-    async function copyReport(btn) {
-        if (!lastAnalysisData) return;
-        try {
-            const md = generateMarkdownReport(lastAnalysisData);
-            await navigator.clipboard.writeText(md);
-            if (btn) {
-                const origHtml = btn.innerHTML;
-                btn.classList.add('copied');
-                btn.innerHTML = `${icon('check')}<span>Copied!</span>`;
-                setTimeout(() => {
-                    btn.classList.remove('copied');
-                    btn.innerHTML = origHtml;
-                }, 2000);
-            }
-        } catch (err) {
-            console.error("[UI] Failed to copy report:", err);
-        }
-    }
-
-    function exportJson() {
-        if (!lastAnalysisData) return;
-        try {
-            const jsonStr = generateSanitizedJsonReport(lastAnalysisData);
-            let host = 'analysis';
-            try {
-                host = new URL(lastAnalysisData.finalUrl || urlInput.value).hostname;
-            } catch (e) { /* keep default */ }
-            const blob = new Blob([jsonStr], { type: 'application/json' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `cdn-report-${host}-${Date.now()}.json`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-        } catch (err) {
-            console.error("[UI] Failed to export JSON report:", err);
-        }
-    }
-
-    if (copyReportBtn) {
-        copyReportBtn.addEventListener('click', () => copyReport(copyReportBtn));
-    }
-
-    if (exportJsonBtn) {
-        exportJsonBtn.addEventListener('click', () => exportJson());
     }
 
     if (refreshBtn) {
@@ -162,7 +105,6 @@ function initPopup() {
         });
     }
 
-    // Listen for real-time progress messages from background.js
     if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
         chrome.runtime.onMessage.addListener((message) => {
             if (message.action === 'ANALYSIS_PROGRESS') {
@@ -179,6 +121,10 @@ function initPopup() {
                 }
                 renderAnalysisState(message.state);
             } else if (message.action === 'ANALYSIS_STATE_CLEARED') {
+                if (currentAnalysisId && analyzeBtn && analyzeBtn.disabled) {
+
+                    return;
+                }
                 currentAnalysisId = null;
                 resetToHomeState();
                 populateActiveTabUrl();
@@ -186,7 +132,6 @@ function initPopup() {
         });
     }
 
-    // Info icon tooltip click handler for mobile/touch + accordion toggling
     if (resultsArea) {
         const tooltipTargets = (e) => {
             const wrapper = e.target.closest && e.target.closest('.info-icon-wrapper');
@@ -196,17 +141,6 @@ function initPopup() {
         resultsArea.addEventListener('focusin', tooltipTargets);
 
         resultsArea.addEventListener('click', (e) => {
-            const footerCopy = e.target.closest && e.target.closest('#footerCopyReportBtn');
-            if (footerCopy) {
-                copyReport(footerCopy);
-                return;
-            }
-            const footerExport = e.target.closest && e.target.closest('#footerExportJsonBtn');
-            if (footerExport) {
-                exportJson();
-                return;
-            }
-
             const wrapper = e.target.closest && e.target.closest('.info-icon-wrapper');
             if (wrapper) {
                 e.stopPropagation();
@@ -233,9 +167,12 @@ function initPopup() {
         const tip = wrapper.querySelector('.info-tooltip');
         if (!tip) return;
         const rect = wrapper.getBoundingClientRect();
-        const width = tip.offsetWidth || 208;
-        const margin = 18;
-        const viewport = Math.min(document.body.clientWidth || 400, document.documentElement.clientWidth || 400);
+        const width = tip.offsetWidth || 220;
+        const margin = 16;
+        const viewport = Math.min(
+            document.body.clientWidth || window.innerWidth || 440,
+            document.documentElement.clientWidth || window.innerWidth || 440
+        );
         const max = viewport - width - margin;
         const desired = rect.left + rect.width / 2 - width / 2;
         const clamped = Math.max(margin, Math.min(desired, Math.max(margin, max)));
@@ -264,8 +201,6 @@ function initPopup() {
         analyzeBtn.disabled = isAnalyzing || analyzeBtn.disabled;
     }
 
-    /* ---------------- analysis ---------------- */
-
     async function analyze() {
         const rawUrl = urlInput.value.trim();
         if (!rawUrl) {
@@ -273,7 +208,6 @@ function initPopup() {
             return;
         }
 
-        // Step 4.1: Validate target URL using standard URL parser
         let validUrl;
         try {
             let candidate = rawUrl;
@@ -300,7 +234,6 @@ function initPopup() {
             return;
         }
 
-        // Step 4.2 & 4.3: Create a unique analysis ID and clear previous displayed analysis
         const runId = 'analysis_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
         currentAnalysisId = runId;
 
@@ -317,7 +250,7 @@ function initPopup() {
                 analysisId: runId
             }, (response) => {
                 if (runId !== currentAnalysisId) {
-                    // Stale response from a superseded run or reset — discard completely!
+
                     return;
                 }
 
@@ -386,10 +319,14 @@ function initPopup() {
             const state = response.state;
             if (state && state.status === 'running') {
                 currentAnalysisId = state.analysisId || null;
+                if (state.url) {
+                    urlInput.value = state.url;
+                    updateFieldUI();
+                }
                 renderAnalysisState(state);
             } else {
-                // Completed or error state from previous run is never restored; start completely fresh
                 currentAnalysisId = null;
+                resetToHomeState();
                 populateActiveTabUrl();
             }
         });
@@ -415,11 +352,14 @@ function initPopup() {
             analyzeBtn.disabled = false;
             setAnalyzingState(false);
             setRefreshingState(false);
-        } else if (state.status === 'error') {
+        } else if (state.status === 'failed' || state.status === 'error') {
             showError(state.error || 'Analysis failed.');
             analyzeBtn.disabled = false;
             setAnalyzingState(false);
             setRefreshingState(false);
+        } else if (state.status === 'cancelled') {
+            resetToHomeState();
+            populateActiveTabUrl();
         }
     }
 
@@ -437,8 +377,6 @@ function initPopup() {
             }
         });
     }
-
-    /* ---------------- presentation ---------------- */
 
     function stopStepCycle() {
         if (stepTimer) {
@@ -506,17 +444,51 @@ function initPopup() {
         lastAnalysisData = data;
         setHomeMode(false);
 
-        const scoreDetails = data.scoreDetails || { score: 0, grade: 'F', breakdown: {} };
-        const score = scoreDetails.score;
-        const grade = scoreDetails.grade || 'A+';
-        const b = scoreDetails.breakdown || {};
+        const cache = data.cache || { documentSource: 'unknown', providerStatus: 'Unknown' };
+        const scoreDetails = data.scoreDetails || { score: 0, grade: 'F', components: {} };
+        const score = Number.isFinite(scoreDetails.score) ? scoreDetails.score : 0;
+        const grade = scoreDetails.grade || 'F';
+        const comps = scoreDetails.components || {};
+        const weights = scoreDetails.weights || { pageLoad: 0.35, ttfb: 0.25, cache: 0.20, compression: 0.10, basicSecurity: 0.10 };
+        const b = {
+            pageLoad: { score: comps.pageLoad ?? null, weight: weights.pageLoad },
+            ttfb: { score: comps.ttfb ?? null, weight: weights.ttfb },
+            cache: { score: comps.cache ?? null, weight: weights.cache },
+            compression: { score: comps.compression ?? null, weight: weights.compression },
+            security: { score: comps.basicSecurity ?? null, weight: weights.basicSecurity }
+        };
+        const COMPONENT_LABELS = { pageLoad: 'page load', ttfb: 'TTFB', cache: 'cache', compression: 'compression', basicSecurity: 'security' };
+        const missingComponents = (scoreDetails.missingComponents || []).map(c => COMPONENT_LABELS[c] || c);
+        const completenessPct = Number.isFinite(scoreDetails.completeness) ? Math.round(scoreDetails.completeness * 100) : null;
+        const scoreCaption = scoreDetails.insufficientData
+            ? `Partial score — only ${completenessPct ?? 0}% of measurements available`
+            : (missingComponents.length
+                ? `${score} / 100 (Grade ${escapeHtml(String(grade))}) · not measured: ${escapeHtml(missingComponents.join(', '))}`
+                : `${score} / 100 points (Grade ${escapeHtml(String(grade))})`);
 
         const cdn = data.cdn || { provider: 'Not Detected', confidence: 'none', evidence: [] };
-        const providerName = (cdn.provider && cdn.provider !== 'Unknown / not detected' && cdn.provider !== 'Unknown') ? cdn.provider : 'Not Detected';
-        const isCdnDetected = providerName !== 'Not Detected';
-        const cdnSubtext = isCdnDetected
-            ? `${escapeHtml(cdn.confidence || 'low')} confidence${cdn.edge && cdn.edge.popCode ? ` • ${escapeHtml(cdn.edge.popCode)}` : ''}`
-            : 'Direct origin delivery';
+        const rawProvider = (cdn.provider && cdn.provider !== 'Unknown / not detected' && cdn.provider !== 'Unknown') ? cdn.provider : 'Not Detected';
+        const isCdnDetected = rawProvider !== 'Not Detected';
+        const providerName = isCdnDetected ? rawProvider : 'Not Identified';
+        const mainCaptured = data.mainDocumentCaptured !== false;
+        const cdnSubtext = !mainCaptured
+            ? 'Document response not captured'
+            : isCdnDetected
+                ? `${escapeHtml(cdn.confidence || 'low')} confidence${cdn.status === 'network-only' ? ' • network only' : ''}${cdn.edge && cdn.edge.popCode ? ` • ${escapeHtml(cdn.edge.popCode)}` : ''}`
+                : 'No CDN signature found';
+        const delivery = data.delivery || null;
+        const dnsSummary = data.dnsSummary || null;
+        const warnings = Array.isArray(data.warnings) ? data.warnings : [];
+        const cacheLayers = (cache.details && cache.details.cdnCache && Array.isArray(cache.details.cdnCache.layers)) ? cache.details.cdnCache.layers : [];
+        const cdnNotes = Array.isArray(cdn.notes) ? cdn.notes : [];
+        const cdnLayers = Array.isArray(cdn.possibleLayers) ? cdn.possibleLayers : [];
+        const cnameChain = (cdn.dns && Array.isArray(cdn.dns.cnames) && cdn.dns.cnames.length) ? cdn.dns.cnames : [];
+        const METHOD_LABELS = {
+            'response-header-inspection': 'Response headers',
+            'dns-cname-inspection': 'DNS CNAME alias',
+            'ip-range-fallback': 'IP range ownership (supporting evidence)',
+            'none': 'None'
+        };
 
         const timing = data.timing || {};
         const connection = data.connection || {};
@@ -524,16 +496,18 @@ function initPopup() {
         const highlights = data.highlights || {};
         const tls = data.tls || { available: false };
         const securityHeaders = data.securityHeaders || {};
-        const cache = data.cache || { documentSource: 'network', providerStatus: 'No Cache Headers' };
         const suggestions = data.suggestions || [];
         const finalUrl = data.finalUrl || urlInput.value.trim();
         const isHttps = finalUrl ? finalUrl.toLowerCase().startsWith('https://') : false;
 
         let host = finalUrl;
-        try { host = new URL(finalUrl).hostname; } catch (err) { /* keep raw */ }
+        try { host = new URL(finalUrl).hostname; } catch (err) {  }
 
         const cacheStatusRaw = cache.providerStatus || 'No Cache Headers';
         const cacheStatusVal = cacheStatusRaw === 'UNKNOWN' ? 'No Edge Cache Headers' : cacheStatusRaw;
+        const edgeCacheRaw = cache.details && cache.details.cdnCache ? cache.details.cdnCache.status : null;
+        const edgeCacheStatus = (!edgeCacheRaw || edgeCacheRaw === 'NONE' || edgeCacheRaw === 'UNKNOWN') ? 'No Edge Cache Headers' : edgeCacheRaw;
+        const cachePolicyStatus = cache.details && cache.details.policy ? cache.details.policy.status : 'Not Available';
 
         const circumference = 2 * Math.PI * 48;
         const offset = circumference - (score / 100) * circumference;
@@ -569,13 +543,19 @@ function initPopup() {
         const originServedCount = Math.max(0, totalRequests - cdnServedCount);
         const cdnRatioText = totalRequests > 0 ? `${cdnServedCount} of ${totalRequests} (${Math.round((cdnServedCount / totalRequests) * 100)}%)` : '0 requests captured';
         const originRatioText = totalRequests > 0 ? `${originServedCount} of ${totalRequests}` : '0 requests captured';
+        const docProviderLabel = delivery && delivery.documentProvider && delivery.documentProvider !== 'Not Detected' ? delivery.documentProvider : 'Not identified';
+        const assetProviderLabel = delivery && delivery.assetProviders && delivery.assetProviders.length
+            ? delivery.assetProviders.slice(0, 4).map(a => `${a.provider} (${a.requestCount})`).join(', ')
+            : 'None identified';
+        const statusPill = Number.isInteger(data.statusCode)
+            ? `<span class="pill ${data.statusCode >= 400 ? 'bad' : 'good'}">${icon('checkCircle')}${data.statusCode}</span>`
+            : `<span class="pill bad">${icon('alert')}No response</span>`;
 
         resultsArea.innerHTML = `
             <div class="dashboard">
-                <!-- Website information -->
                 <div class="card site-card">
                     <div class="site-head">
-                        <img class="site-favicon" alt="" src="https://www.google.com/s2/favicons?sz=64&domain=${encodeURIComponent(host)}" onerror="this.style.display='none'">
+                        <img class="site-favicon" alt="" src="https://www.google.com/s2/favicons?sz=64&domain=${encodeURIComponent(host)}">
                         <div style="min-width:0">
                             <div class="site-host">${escapeHtml(host)}</div>
                             <div class="site-url">${escapeHtml(finalUrl)}</div>
@@ -583,13 +563,18 @@ function initPopup() {
                     </div>
                     <div class="site-meta">
                         <span class="pill ${isHttps ? 'good' : 'bad'}">${icon('shield')}${isHttps ? 'HTTPS' : 'HTTP'}</span>
-                        <span class="pill ${data.statusCode >= 400 ? 'bad' : 'good'}">${icon('checkCircle')}${data.statusCode || 200}</span>
+                        ${statusPill}
                         <span class="pill">${icon('bolt')}${escapeHtml(connection.protocol || 'Unknown')}</span>
                         <span class="pill ${isCdnDetected ? 'accent' : ''}">${icon('cloud')}${escapeHtml(providerName)}</span>
                     </div>
                 </div>
 
-                <!-- Performance score -->
+                ${warnings.length ? `
+                <div class="error-msg">
+                    ${icon('alert')}
+                    <span><strong>Partial results</strong>${warnings.map(w => escapeHtml(w)).join('<br>')}</span>
+                </div>` : ''}
+
                 <div class="card score-card">
                     <div class="gauge">
                         <svg width="108" height="108" viewBox="0 0 108 108">
@@ -604,18 +589,17 @@ function initPopup() {
                     </div>
                     <div class="score-copy">
                         <span class="score-label">Performance Score${renderInfoIcon("Weighted evaluation of page load speed, TTFB, edge cache efficiency, compression, and security headers.", "left")}</span>
-                        <span class="caption">${score} / 100 points (Grade ${escapeHtml(String(grade))})</span>
+                        <span class="caption">${scoreCaption}</span>
                         <div class="score-breakdown-pills">
-                            <span class="pill-sm" title="Page Load Speed: ${formatBreakdownItem(b.pageLoad)}">Load: ${b.pageLoad?.score ?? 'N/A'}</span>
-                            <span class="pill-sm" title="Time to First Byte: ${formatBreakdownItem(b.ttfb)}">TTFB: ${b.ttfb?.score ?? 'N/A'}</span>
-                            <span class="pill-sm" title="Edge Cache Efficiency: ${formatBreakdownItem(b.cache)}">Cache: ${b.cache?.score ?? 'N/A'}</span>
-                            <span class="pill-sm" title="Compression: ${formatBreakdownItem(b.compression)}">Comp: ${b.compression?.score ?? 'N/A'}</span>
-                            <span class="pill-sm" title="Security & HTTPS: ${formatBreakdownItem(b.security)}">Sec: ${b.security?.score ?? 'N/A'}</span>
+                            <span class="pill-sm" title="Page Load Speed: ${formatBreakdownItem(b.pageLoad)}">Load: ${b.pageLoad.score ?? 'N/A'}</span>
+                            <span class="pill-sm" title="Time to First Byte: ${formatBreakdownItem(b.ttfb)}">TTFB: ${b.ttfb.score ?? 'N/A'}</span>
+                            <span class="pill-sm" title="Edge Cache Efficiency: ${formatBreakdownItem(b.cache)}">Cache: ${b.cache.score ?? 'N/A'}</span>
+                            <span class="pill-sm" title="Compression: ${formatBreakdownItem(b.compression)}">Comp: ${b.compression.score ?? 'N/A'}</span>
+                            <span class="pill-sm" title="Security & HTTPS: ${formatBreakdownItem(b.security)}">Sec: ${b.security.score ?? 'N/A'}</span>
                         </div>
                     </div>
                 </div>
 
-                <!-- Quick stats -->
                 <div class="stats-grid">
                     ${statCard('cloud', 'CDN', escapeHtml(providerName), cdnSubtext, isCdnDetected ? 'text-accent' : 'text-muted')}
                     ${statCard('shield', 'SSL', isHttps ? (tls.available ? escapeHtml(tls.version) : 'Secured') : 'Not Secure', isHttps ? 'Encrypted transport' : 'Plain HTTP', isHttps ? 'text-success' : 'text-error')}
@@ -623,7 +607,6 @@ function initPopup() {
                     ${statCard('clock', 'TTFB', formatDuration(ttfbMs), 'Time to first byte')}
                 </div>
 
-                <!-- Detailed analysis -->
                 <div class="accordions">
                     ${accordion('gauge', 'Performance', '', true, `
                         <div class="rows">
@@ -631,7 +614,11 @@ function initPopup() {
                             ${row('DOM Content Loaded', formatDuration(domContentLoadedMs), '', "Time elapsed until HTML document is completely parsed and DOM tree is constructed.")}
                             ${row('Page Load Event', formatDuration(loadEventMs), '', "Total time elapsed until window onload event fired.")}
                             ${row('Network Idle', formatDuration(networkIdleMs), '', "Time elapsed until network activity completely settles after page load.")}
-                            ${row('Full TTFB', formatDuration(ttfbMs), '', "Time to First Byte - duration between request start and first response byte.")}
+                            ${row('Full TTFB', formatDuration(ttfbMs), '', timing.ttfbUnavailableReason ? `Unavailable: ${timing.ttfbUnavailableReason}.` : "Waiting for server response: from request sent to first response byte (matches DevTools).")}
+                            ${row('DNS Resolution', formatPhaseDuration(dnsMs, dnsPct, isReused, false), '', "Time required to resolve domain name into IP address.")}
+                            ${row(connectionPhaseLabel, formatPhaseDuration(tcpMs, tcpPct, isReused, false), '', "Time spent establishing initial TCP connection or QUIC session.")}
+                            ${row('TLS Handshake', formatPhaseDuration(tlsMs, tlsPct, isReused, !isHttps), '', "Time spent negotiating TLS security keys and validating SSL certificate.")}
+                            ${row('Request Dispatch', formatDuration(timing.requestSentMs), '', "Time spent dispatching the HTTP request to the network.")}
                             ${row('Document Download', formatDuration(downloadMs), '', "Time taken to receive the full main document body.")}
                             ${row('Remote IP', escapeHtml(connection.remoteIp || 'Not Available'), 'mono', "The resolved IP address of the edge or origin server.")}
                         </div>
@@ -643,6 +630,7 @@ function initPopup() {
                             ${row('TLS Version', tls.available ? escapeHtml(tls.version) : (isHttps ? 'HTTPS Active (Metadata Not Exposed)' : 'Not Applicable (Plain HTTP)'), '', "The negotiated TLS protocol version.")}
                             ${row('Cipher Suite', tls.available ? escapeHtml(tls.cipher) : (isHttps ? 'Encrypted (Cipher Not Exposed)' : 'Not Applicable'), 'mono', "Cryptographic cipher suite used for encryption.")}
                             ${row('Certificate Issuer', tls.available ? escapeHtml(tls.issuer) : (isHttps ? 'Managed / System CA' : 'Not Applicable'), '', "Certificate Authority (CA) that issued the SSL/TLS certificate.")}
+                            ${row('Certificate Subject', tls.subject ? escapeHtml(tls.subject) : (isHttps ? 'Secured (Host Match)' : 'Not Applicable'), '', "Common name or subject identity on the TLS certificate.")}
                         </div>
                     `)}
 
@@ -657,31 +645,44 @@ function initPopup() {
                     ${accordion('database', 'Cache', '', false, `
                         <div class="rows">
                             ${row('Doc Delivery Source', formatDocumentSource(cache.documentSource), 'text-info', "Browser retrieval layer: network fetch, disk cache, service worker, or prefetch.")}
-                            ${row('CDN Edge Cache Status', formatCdnStatusLabel(cacheStatusVal), cacheStatusVal.includes('HIT') ? 'text-success' : 'text-warning', "Cache status at the CDN edge node: HIT, MISS, BYPASS, or no edge cache headers.")}
+                            ${row('CDN Edge Cache Status', formatCdnStatusLabel(edgeCacheStatus), edgeCacheStatus.includes('HIT') ? 'text-success' : 'text-warning', "Cache status reported by the CDN edge (HIT, MISS, DYNAMIC, BYPASS…). Only taken from cache-status headers, never from Cache-Control.")}
+                            ${row('Cache-Control Policy', escapeHtml(cachePolicyStatus), '', "What the origin allows: no-store = never cached, no-cache = revalidate every time, private = browser only.")}
                             ${row('CDN Provider', escapeHtml(providerName), 'text-accent', "Identifies Content Delivery Network routing traffic to edge servers.")}
-                            ${row('Detection Confidence', escapeHtml(cdn.confidence || 'none'), '', "How strong the CDN fingerprint evidence is.")}
+                            ${row('Detection Confidence', escapeHtml(cdn.confidence || 'none'), '', "high = provider-specific header (or header + DNS agreement); medium = weaker provider signal or CNAME; low = IP ownership only.")}
+                            ${row('Detection Method', escapeHtml(METHOD_LABELS[cdn.detectionMethod] || cdn.detectionMethod || 'None'), '', "Which source produced the strongest evidence.")}
+                            ${cnameChain.length ? row('DNS CNAME Chain', escapeHtml(cnameChain.join(' → ')), 'mono wrap', "DNS aliases resolved for the document hostname via DNS-over-HTTPS.") : ''}
+                            ${row('Document Delivered By', escapeHtml(docProviderLabel), '', "Provider identified for the main HTML document.")}
+                            ${row('Asset Providers', escapeHtml(assetProviderLabel), 'wrap', "Providers identified for images, scripts, styles, fonts and API requests (request counts).")}
                             ${cdn.edge && cdn.edge.edgePop ? row('Edge Server Node', escapeHtml(cdn.edge.edgePop), 'mono', "Physical edge server node identifier.") : ''}
                             ${cdn.edge && cdn.edge.popCode ? row('Geographic PoP (IATA)', escapeHtml(cdn.edge.popCode), 'mono', "Verified airport/city IATA code representing geographic PoP location.") : (cdn.edge && cdn.edge.edgePop ? row('Geographic PoP', 'Unmapped / Not Identified', '', "Physical node ID reported without verified geographic IATA mapping.") : '')}
-                            ${data.allProviders && data.allProviders.length > 1 ? row('All Detected CDNs', escapeHtml(data.allProviders.join(', ')), 'text-accent', "All distinct CDN providers observed across assets and subdomains.") : ''}
-                            ${cdn.evidence && cdn.evidence.length > 0 ? row('Primary Evidence', escapeHtml(cdn.evidence[0]), 'mono', "Header or fingerprint used to identify the provider.") : ''}
+                            ${data.allProviders && data.allProviders.length > 1 ? row('All Detected Providers', escapeHtml(data.allProviders.join(', ')), 'text-accent wrap', "All distinct delivery, hosting and storage providers observed across the document and its assets.") : ''}
+                            ${cdn.evidence && cdn.evidence.length > 0 ? row('Primary Evidence', escapeHtml(cdn.evidence[0]), 'mono wrap', "Header or fingerprint used to identify the provider.") : ''}
+                            ${cdn.evidence && cdn.evidence.length > 1 ? row('All Evidence', cdn.evidence.map(e => escapeHtml(e)).join('<br>'), 'mono wrap', "Every observed signal for this provider, with its strength and whether it is product-specific.") : ''}
+                            ${cdnLayers.length ? row('Other Layers', escapeHtml(cdnLayers.map(l => `${l.provider} (${l.role === 'origin-storage' ? 'origin storage' : l.confidence})`).join(', ')), 'wrap', "Other providers with evidence on the same response, e.g. a hosting platform behind a CDN or an object-storage origin.") : ''}
+                            ${cacheLayers.length > 1 ? row('Cache Layers', cacheLayers.map(l => escapeHtml(`${l.header}: ${l.rawValue}`)).join('<br>'), 'mono wrap', "Every cache-status header observed, in priority order.") : ''}
+                            ${cdnNotes.length ? row('Notes', escapeHtml(cdnNotes.join(' ')), 'wrap', "Caveats that apply to this detection.") : ''}
+                            ${dnsSummary && dnsSummary.attempted ? row('DNS Lookups', `${dnsSummary.resolved} of ${dnsSummary.attempted} hosts resolved${dnsSummary.timedOut ? ' (time budget reached)' : ''}`, '', "CNAME lookups for the document and resource hostnames (DNS-over-HTTPS).") : ''}
                         </div>
                     `)}
 
                     ${accordion('file', 'Resources', String(transfer.requestCount || 0), false, `
                         <div class="rows">
                             ${row('Total Requests Captured', totalRequests, '', "Total number of network requests executed during page load.")}
-                            ${row('CDN-Delivered Requests', cdnRatioText, cdnServedCount > 0 ? 'text-success' : '', "Requests verified to have been served by a Content Delivery Network.")}
-                            ${row('Origin / Direct Requests', originRatioText, '', "Requests served directly from origin or without CDN headers.")}
+                            ${row('Provider-Identified Requests', cdnRatioText, cdnServedCount > 0 ? 'text-success' : '', "Requests with evidence of a CDN, edge, hosting or storage provider.")}
+                            ${row('No CDN Signature Found', originRatioText, '', "Requests with no provider-specific CDN evidence. This does not prove they were served directly from origin.")}
                             ${row('Browser Cached Requests', transfer.cachedRequestCount || 0, '', "Requests served from browser disk or memory cache.")}
                             ${row('Failed Requests', transfer.failedRequestCount || 0, transfer.failedRequestCount > 0 ? 'text-error' : 'text-success', "Network requests that failed or encountered network errors.")}
                             ${row('1st vs 3rd Party', `${transfer.firstPartyCount || 0} / ${transfer.thirdPartyCount || 0}`, '', "First-party requests to primary domain vs third-party requests to external domains.")}
                             ${row('Encoded Network Bytes', formatBytes(transfer.encodedBytes), '', "Total compressed network bytes transferred across all requests.")}
                             ${row('Decoded Payload Bytes', formatBytes(transfer.decodedBytes), '', "Total uncompressed payload bytes after decoding.")}
+                            ${row('Overall Transfer Speed', escapeHtml(transfer.pageTransferSpeedFormatted || (transfer.pageTransferSpeed ? formatSpeed(transfer.pageTransferSpeed) : 'Not Available')), '', "Combined network transfer throughput across page resources.")}
+                            ${row('Document Transfer Speed', escapeHtml(transfer.documentTransferSpeedFormatted || (transfer.documentTransferSpeed ? formatSpeed(transfer.documentTransferSpeed) : 'Not Available')), '', "Transfer throughput for primary HTML document payload.")}
+                            ${row('Content Compression', escapeHtml(connection.compression ? connection.compression.toUpperCase() : 'None / Not Observed'), '', "HTTP payload compression encoding (gzip, brotli, zstd).")}
                         </div>
                         ${hostEntries.length > 0 ? `
                             <div class="subcard">
                                 <div class="subcard-head">
-                                    <span>Host Delivery Breakdown${renderInfoIcon("Detected CDN and request count per host.", "left")}</span>
+                                    <span>Host Delivery Breakdown${renderInfoIcon("Identified provider and request count per host.", "left")}</span>
                                     <span class="subcard-meta">${hostEntries.length} hosts</span>
                                 </div>
                                 <div class="host-list">
@@ -689,7 +690,7 @@ function initPopup() {
                                         <div class="host-item">
                                             <span class="host-name" title="${escapeHtml(hName)}">${escapeHtml(hName)}</span>
                                             <span class="host-meta">
-                                                <span class="badge ${hData.provider && hData.provider !== 'Not Detected' && hData.provider !== 'Unknown' ? 'good' : ''}">${escapeHtml(hData.provider || 'Direct')}</span>
+                                                <span class="badge ${hData.provider && hData.provider !== 'Not Detected' && hData.provider !== 'Unknown' ? 'good' : ''}">${escapeHtml(hData.provider && hData.provider !== 'Not Detected' ? hData.provider : 'Not identified')}</span>
                                                 <span>${hData.requestCount || 0} reqs</span>
                                             </span>
                                         </div>
@@ -729,24 +730,13 @@ function initPopup() {
                         </div>
                     `)}
                 </div>
-
-                <!-- Analysis report card -->
-                <div class="card report-card">
-                    <div class="report-card-info">
-                        <span class="report-card-title">${icon('file')} Analysis Audit Report</span>
-                        <span class="caption">Structured 8-section audit without sensitive data</span>
-                    </div>
-                    <div class="report-card-actions">
-                        <button id="footerCopyReportBtn" class="ghost-btn" type="button" title="Copy Markdown Report">
-                            ${icon('checkCircle')}<span>Copy</span>
-                        </button>
-                        <button id="footerExportJsonBtn" class="ghost-btn" type="button" title="Export Sanitized JSON">
-                            ${icon('bolt')}<span>JSON</span>
-                        </button>
-                    </div>
-                </div>
             </div>
         `;
+
+        const favicon = resultsArea.querySelector('.site-favicon');
+        if (favicon) {
+            favicon.addEventListener('error', () => { favicon.style.display = 'none'; }, { once: true });
+        }
 
         setTimeout(() => {
             const circle = document.getElementById('scoreCircle');
@@ -766,8 +756,6 @@ function initPopup() {
         };
         requestAnimationFrame(tick);
     }
-
-    /* ---------------- render helpers ---------------- */
 
     function statCard(iconName, label, value, sub, valueClass = '') {
         return `
@@ -799,7 +787,7 @@ function initPopup() {
         return `
             <div class="row">
                 <span class="row-label">${escapeHtml(label)}${tooltip ? renderInfoIcon(tooltip, 'left') : ''}</span>
-                <span class="row-value ${valueClass}" title="${String(value).replace(/"/g, '')}">${value}</span>
+                <span class="row-value ${valueClass}" title="${String(value).replace(/<[^>]*>/g, ' ').replace(/"/g, '')}">${value}</span>
             </div>`;
     }
 
@@ -856,7 +844,6 @@ function initPopup() {
         cloud: '<path d="M17.5 19a4.5 4.5 0 0 0 .5-8.96A6 6 0 0 0 6.2 10.5A3.75 3.75 0 0 0 7 19z"></path>',
         bolt: '<path d="M13 2 4.5 13.5H11l-.8 8.5L19.5 10H13z"></path>',
         gauge: '<path d="M12 14l4-4"></path><path d="M20.5 17a9 9 0 1 0-17 0"></path><circle cx="12" cy="14" r="1.6"></circle>',
-        file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"></path><path d="M14 3v5h5"></path>',
         checkCircle: '<circle cx="12" cy="12" r="9"></circle><path d="m8.5 12.3 2.4 2.4 4.6-4.9"></path>',
         check: '<path d="m4.5 12.5 5 5 10-11"></path>',
         alert: '<path d="M10.3 3.9 2.5 17.4A1.9 1.9 0 0 0 4.2 20.3h15.6a1.9 1.9 0 0 0 1.7-2.9L13.7 3.9a1.9 1.9 0 0 0-3.4 0z"></path><path d="M12 9v4"></path><path d="M12 16.5h.01"></path>',
@@ -909,6 +896,14 @@ function initPopup() {
         return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
     }
 
+    function formatSpeed(bytesPerSec) {
+        if (!bytesPerSec || !Number.isFinite(bytesPerSec) || bytesPerSec <= 0) return 'Not Available';
+        if (bytesPerSec >= 1024 * 1024) {
+            return `${(bytesPerSec / (1024 * 1024)).toFixed(2)} MB/s`;
+        }
+        return `${(bytesPerSec / 1024).toFixed(1)} KB/s`;
+    }
+
     function formatDocumentSource(source) {
         switch (source) {
             case 'disk-cache': return 'Disk Cache';
@@ -916,6 +911,7 @@ function initPopup() {
             case 'service-worker': return 'Service Worker';
             case 'prefetch': return 'Prefetch';
             case 'network': return 'Network';
+            case 'unknown': return 'Not Captured';
             default: return source || 'Network';
         }
     }
@@ -924,7 +920,10 @@ function initPopup() {
         if (!status || status === 'UNKNOWN' || status === 'Unknown') return 'No Edge Cache Headers';
         if (status === 'HIT') return 'CDN HIT (Edge Cache)';
         if (status === 'MISS') return 'CDN MISS (Origin Fetch)';
-        if (status === 'BYPASS') return 'CDN BYPASS (Dynamic)';
+        if (status === 'BYPASS') return 'CDN BYPASS (Cache Skipped)';
+        if (status === 'DYNAMIC') return 'DYNAMIC (not cached)';
+        if (status === 'EXPIRED') return 'CDN EXPIRED (Refetched)';
+        if (status === 'STALE') return 'CDN STALE (Served Stale)';
         if (status === 'REVALIDATED') return 'CDN REVALIDATED (304)';
         return status;
     }

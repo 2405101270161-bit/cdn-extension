@@ -1,9 +1,3 @@
-/**
- * Test Suite: Analysis Lifecycle & State Isolation
- * Verifies fresh state initialization, stale-data prevention, generation isolation,
- * asynchronous callback gating, debugger/tab resource cleanup, and timeout handling.
- */
-
 import assert from 'node:assert';
 
 console.log("=================================================");
@@ -26,7 +20,6 @@ async function test(name, fn) {
     }
 }
 
-// Set up Chrome API mock environment
 let storageSession = {};
 let storageLocal = {};
 let storageSync = {};
@@ -98,10 +91,8 @@ const mockChrome = {
 
 globalThis.chrome = mockChrome;
 
-// Import background.js for lifecycle testing
 const bg = await import('../background.js');
 
-// 1. Fresh application state initialization
 await test("A new analysis begins with fresh application state (all storage cleared)", async () => {
     storageSession['cdnAnalyzerAnalysisState'] = { status: 'completed', oldData: true };
     storageSession['lastAnalysis'] = { stale: true };
@@ -116,14 +107,12 @@ await test("A new analysis begins with fresh application state (all storage clea
     assert.strictEqual(storageSync['cdnCache'], undefined);
 });
 
-// 2. Old analysis data does not appear when querying state
 await test("GET_ANALYSIS_STATE returns null when analysis was cleared or idle", async () => {
     await bg.clearAnalysisState();
     const state = await bg.getStoredAnalysisState();
     assert.strictEqual(state, null, "Stored state must be null after reset");
 });
 
-// 3. Concurrent analyses cannot overwrite one another (generation isolation & cancellation)
 await test("Starting a new analysis supersedes and cancels any running analysis", async () => {
     createdTabs = [];
     removedTabs = [];
@@ -132,7 +121,6 @@ await test("Starting a new analysis supersedes and cancels any running analysis"
 
     const onMessage = runtimeListeners[0];
 
-    // Start first run
     let firstResponse = null;
     const firstPromise = new Promise((resolve) => {
         onMessage({
@@ -145,10 +133,8 @@ await test("Starting a new analysis supersedes and cancels any running analysis"
         });
     });
 
-    // Allow execution to reach background tab creation & CDP attach
     await new Promise(r => setTimeout(r, 60));
 
-    // Immediately start second run with different ID
     let secondResponse = null;
     const secondPromise = new Promise((resolve) => {
         onMessage({
@@ -161,18 +147,15 @@ await test("Starting a new analysis supersedes and cancels any running analysis"
         });
     });
 
-    // First run must resolve with cancelled status
     await firstPromise;
     assert.ok(firstResponse !== null, "First run received response");
     assert.strictEqual(firstResponse.cancelled, true, "First run was cancelled by second run");
 
-    // Cancel second run to finish clean
     await bg.clearAnalysisState();
     await secondPromise;
     assert.ok(secondResponse !== null, "Second run finished cleanly");
 });
 
-// 4. Stale asynchronous callbacks are ignored by UI/background
 await test("Superseded run callbacks do not update active analysis state", async () => {
     const currentState = await bg.getStoredAnalysisState();
     if (currentState) {
@@ -180,7 +163,6 @@ await test("Superseded run callbacks do not update active analysis state", async
     }
 });
 
-// 5. Analysis errors are reported clearly (invalid schemes, malformed URLs)
 await test("START_ANALYSIS rejects unsupported schemes (ftp://, chrome://, file://)", async () => {
     const onMessage = runtimeListeners[0];
 
@@ -204,7 +186,6 @@ await test("START_ANALYSIS rejects unsupported schemes (ftp://, chrome://, file:
     assert.strictEqual(chromeResponse.success, false);
 });
 
-// 6. Temporary analysis tabs and debugger sessions are cleaned up
 await test("Temporary background tabs and debugger sessions are detached and removed", async () => {
     assert.ok(createdTabs.length > 0, "Background tabs were created during test suite");
     assert.ok(removedTabs.length > 0, "Background tabs were removed");
@@ -216,7 +197,6 @@ await test("Temporary background tabs and debugger sessions are detached and rem
     }
 });
 
-// 7. CLEAR_ANALYSIS_STATE broadcasts ANALYSIS_STATE_CLEARED
 await test("CLEAR_ANALYSIS_STATE broadcasts cleared event to all listening contexts", async () => {
     broadcastMessages = [];
     const onMessage = runtimeListeners[0];

@@ -1,38 +1,31 @@
-/**
- * CDN Analyzer Pro v2 - Resource Analysis Module
- * Analyzes network payload sizes, resource types, largest assets, slowest requests,
- * and classifies 1st vs 3rd party domains with multi-part public suffix support.
- */
-
-// Multi-part public suffixes (ccTLD and public service domains)
 const MULTI_PART_SUFFIXES = new Set([
-    // United Kingdom
+
     'co.uk', 'org.uk', 'gov.uk', 'ac.uk', 'me.uk', 'net.uk', 'ltd.uk', 'plc.uk', 'sch.uk',
-    // Australia
+
     'com.au', 'net.au', 'org.au', 'edu.au', 'gov.au', 'asn.au', 'id.au',
-    // New Zealand
+
     'co.nz', 'net.nz', 'org.nz', 'govt.nz', 'ac.nz', 'geek.nz', 'school.nz',
-    // Japan
+
     'co.jp', 'ne.jp', 'ac.jp', 'go.jp', 'or.jp', 'ed.jp', 'ad.jp',
-    // Brazil
+
     'com.br', 'net.br', 'org.br', 'gov.br', 'edu.br', 'art.br',
-    // Singapore
+
     'com.sg', 'edu.sg', 'gov.sg', 'net.sg', 'org.sg', 'per.sg',
-    // South Africa
+
     'co.za', 'org.za', 'net.za', 'gov.za', 'ac.za', 'web.za',
-    // India
+
     'co.in', 'net.in', 'org.in', 'gen.in', 'firm.in', 'ind.in', 'ac.in', 'edu.in', 'res.in', 'gov.in',
-    // Mexico
+
     'com.mx', 'org.mx', 'edu.mx', 'gob.mx', 'net.mx',
-    // Turkey
+
     'com.tr', 'edu.tr', 'gov.tr', 'org.tr', 'net.tr', 'bbs.tr',
-    // Hong Kong
+
     'com.hk', 'edu.hk', 'gov.hk', 'net.hk', 'org.hk', 'idv.hk',
-    // Taiwan
+
     'com.tw', 'org.tw', 'gov.tw', 'edu.tw', 'net.tw', 'idv.tw',
-    // South Korea
+
     'co.kr', 'ne.kr', 're.kr', 'go.kr', 'pe.kr', 'or.kr',
-    // Latin America & others
+
     'com.ar', 'gov.ar', 'org.ar',
     'com.co', 'gov.co', 'org.co',
     'com.pe', 'gob.pe', 'org.pe',
@@ -45,21 +38,15 @@ const MULTI_PART_SUFFIXES = new Set([
     'com.vn', 'gov.vn', 'edu.vn', 'org.vn',
     'com.ua', 'gov.ua', 'edu.ua', 'org.ua',
     'co.il', 'org.il', 'gov.il', 'ac.il',
-    // Public cloud / hosting domains where tenants share a suffix
+
     'github.io', 'gitlab.io', 'appspot.com', 'cloudfront.net', 'vercel.app', 'azurewebsites.net', 'firebaseapp.com'
 ]);
 
-/**
- * Extracts the registrable (eTLD+1) domain from a hostname.
- * Accurately handles multi-part suffixes like bbc.co.uk -> bbc.co.uk
- * without treating co.uk as the root organization domain.
- */
 export function getRegistrableDomain(hostname) {
     if (!hostname || typeof hostname !== 'string') return '';
     let host = hostname.toLowerCase().trim();
     if (host.endsWith('.')) host = host.slice(0, -1);
 
-    // IP addresses (IPv4 or IPv6) or single-label hosts (e.g. localhost)
     if (!host.includes('.') || /^[\d.]+$/.test(host) || host.includes(':')) {
         return host;
     }
@@ -67,13 +54,11 @@ export function getRegistrableDomain(hostname) {
     const parts = host.split('.');
     if (parts.length <= 2) return host;
 
-    // Check two-part public suffix (e.g. co.uk, com.au)
     const twoPart = parts.slice(-2).join('.');
     if (MULTI_PART_SUFFIXES.has(twoPart)) {
         return parts.slice(-3).join('.');
     }
 
-    // Standard top-level domain (e.g. example.com, test.org)
     return parts.slice(-2).join('.');
 }
 
@@ -127,7 +112,6 @@ export function analyzeResources(targetUrl, requestsMap) {
 
         requestCount++;
 
-        // Distinguish transferred encoded bytes from decoded body size
         const encodedBytes = (req.encodedDataLength !== undefined && req.encodedDataLength !== null && Number.isFinite(req.encodedDataLength))
             ? Math.max(0, req.encodedDataLength)
             : 0;
@@ -147,7 +131,6 @@ export function analyzeResources(targetUrl, requestsMap) {
             totalDecodedBytes += decodedBytes;
         }
 
-        // Cache & Service Worker classification
         const fromDisk = Boolean(req.response?.fromDiskCache);
         const fromMemory = Boolean(req.response?.fromMemoryCache || req.servedFromCache);
         const fromSW = Boolean(req.response?.fromServiceWorker);
@@ -158,14 +141,12 @@ export function analyzeResources(targetUrl, requestsMap) {
             serviceWorkerRequestCount++;
         }
 
-        // Failure & Cancellation tracking
         if (req.canceled) {
             canceledRequestCount++;
         } else if (req.failed) {
             failedRequestCount++;
         }
 
-        // 1st vs 3rd party domain classification with public suffix handling
         try {
             const reqHostname = new URL(req.url).hostname.toLowerCase();
             const reqRegistrable = getRegistrableDomain(reqHostname);
@@ -182,7 +163,6 @@ export function analyzeResources(targetUrl, requestsMap) {
             firstPartyCount++;
         }
 
-        // Duration calculation
         const startTime = (req.requestWillBeSentTime !== null && Number.isFinite(req.requestWillBeSentTime))
             ? req.requestWillBeSentTime
             : null;
@@ -195,7 +175,6 @@ export function analyzeResources(targetUrl, requestsMap) {
             duration = Math.max(0, endTime - startTime);
         }
 
-        // Resource type categorization
         const rawType = (req.type || 'Other').toLowerCase();
         let cat = 'other';
         if (rawType.includes('document')) cat = 'document';
@@ -228,31 +207,26 @@ export function analyzeResources(targetUrl, requestsMap) {
             canceled: Boolean(req.canceled)
         };
 
-        // Largest Overall
         if (sizeForHighlights > maxBytes) {
             maxBytes = sizeForHighlights;
             largestResource = reqSummary;
         }
 
-        // Largest Image
         if (cat === 'image' && sizeForHighlights > maxImageBytes) {
             maxImageBytes = sizeForHighlights;
             largestImage = reqSummary;
         }
 
-        // Largest JS
         if (cat === 'script' && sizeForHighlights > maxJSBytes) {
             maxJSBytes = sizeForHighlights;
             largestJS = reqSummary;
         }
 
-        // Largest CSS
         if (cat === 'stylesheet' && sizeForHighlights > maxCSSBytes) {
             maxCSSBytes = sizeForHighlights;
             largestCSS = reqSummary;
         }
 
-        // Slowest Resource (only consider finite positive durations)
         if (duration !== null && duration > maxDuration) {
             maxDuration = duration;
             slowestResource = reqSummary;
@@ -279,4 +253,3 @@ export function analyzeResources(targetUrl, requestsMap) {
         }
     };
 }
-

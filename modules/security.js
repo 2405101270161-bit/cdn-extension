@@ -1,21 +1,8 @@
-/**
- * CDN Analyzer Pro v2 - Security Analysis Module
- * Extracts security headers, TLS details, Certificate CA info, and policies.
- *
- * FIXES APPLIED:
- *  BUG-18: isHttps now relies solely on the URL scheme. The previous check
- *          also required mainDocumentResponse.securityDetails to be present,
- *          which caused HTTPS pages served from disk cache or service worker
- *          (where Chrome omits securityDetails) to be reported as insecure.
- */
-
 export function analyzeSecurity(targetUrl, mainDocumentResponse, headers = {}) {
     const docUrl = (mainDocumentResponse && mainDocumentResponse.url) ? mainDocumentResponse.url : (targetUrl || '');
-    // BUG-18 FIX: Trust the URL scheme. Chrome does not populate securityDetails
-    // for cached responses even when the original connection was HTTPS.
+
     const isHttps = docUrl.toLowerCase().startsWith('https://');
 
-    // TLS Certificate info from CDP securityDetails
     let tlsDetails = { available: false };
     if (mainDocumentResponse && mainDocumentResponse.securityDetails) {
         const sec = mainDocumentResponse.securityDetails;
@@ -32,7 +19,6 @@ export function analyzeSecurity(targetUrl, mainDocumentResponse, headers = {}) {
         };
     }
 
-    // Lowercase header map for case-insensitive lookup
     const normHeaders = {};
     for (const [k, v] of Object.entries(headers)) {
         normHeaders[k.toLowerCase()] = String(v);
@@ -95,8 +81,6 @@ export function analyzeSecurity(targetUrl, mainDocumentResponse, headers = {}) {
             description: corp ? `Cross-Origin Resource Policy (${corp})` : "Missing Cross-Origin-Resource-Policy header"
         }
     };
-
-    console.log("[Security Debug] HSTS present:", !!hsts, "| CSP present:", !!csp, "| X-Frame-Options:", !!xFrameOptions);
 
     return {
         isHttps,

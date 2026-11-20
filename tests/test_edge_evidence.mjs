@@ -1,9 +1,3 @@
-/**
- * Test Suite: Edge-Server Evidence & Identification
- * Verifies edge-server PoP extraction, remote IP separation, absence of fabricated locations,
- * and decoupling of provider detection from physical edge server identity.
- */
-
 import assert from 'node:assert';
 import { extractEdgeEvidence, detectCdnProvider } from '../modules/cdn.js';
 
@@ -27,7 +21,6 @@ function test(name, fn) {
     }
 }
 
-// 1. Cloudflare cf-ray with standard IATA 3-letter airport code suffix
 test("Cloudflare cf-ray with location suffix extracts edgePop and popCode", () => {
     const edge = extractEdgeEvidence({
         'cf-ray': '8f3bc4928b971234-IAD'
@@ -41,7 +34,6 @@ test("Cloudflare cf-ray with location suffix extracts edgePop and popCode", () =
     assert.strictEqual(edge.confidence, 'high');
 });
 
-// 2. Cloudflare cf-ray without location suffix
 test("Cloudflare cf-ray without location suffix preserves request identifier without guessing PoP", () => {
     const edge = extractEdgeEvidence({
         'cf-ray': '8f3bc4928b971234'
@@ -52,7 +44,6 @@ test("Cloudflare cf-ray without location suffix preserves request identifier wit
     assert.strictEqual(edge.remoteIp, '104.21.5.12');
 });
 
-// 3. CloudFront x-amz-cf-pop identifier
 test("Amazon CloudFront x-amz-cf-pop extracts full node and 3-letter IATA code", () => {
     const edge = extractEdgeEvidence({
         'x-amz-cf-pop': 'DFW50-C2',
@@ -66,7 +57,6 @@ test("Amazon CloudFront x-amz-cf-pop extracts full node and 3-letter IATA code",
     assert.strictEqual(edge.availability, 'available');
 });
 
-// 4. Fastly x-served-by with multi-hop cache nodes
 test("Fastly x-served-by extracts final delivery edge node and popCode", () => {
     const edge = extractEdgeEvidence({
         'x-served-by': 'cache-bwi5120-BWI, cache-iad-kiad12345-IAD',
@@ -79,7 +69,6 @@ test("Fastly x-served-by extracts final delivery edge node and popCode", () => {
     assert.strictEqual(edge.evidenceSource, 'x-served-by');
 });
 
-// 5. Akamai diagnostic request ID and GRN
 test("Akamai akamai-grn and request ID recorded without fabricating physical location", () => {
     const edge = extractEdgeEvidence({
         'akamai-grn': '0.12345.6789.abcdef',
@@ -91,7 +80,6 @@ test("Akamai akamai-grn and request ID recorded without fabricating physical loc
     assert.strictEqual(edge.evidenceSource, 'akamai-grn');
 });
 
-// 6. Vercel x-vercel-id
 test("Vercel x-vercel-id extracts edge region identifier", () => {
     const edge = extractEdgeEvidence({
         'x-vercel-id': 'sfo1::sfo1::12345-67890'
@@ -102,7 +90,6 @@ test("Vercel x-vercel-id extracts edge region identifier", () => {
     assert.strictEqual(edge.evidenceSource, 'x-vercel-id');
 });
 
-// 7. CDN77 x-77-pop
 test("CDN77 x-77-pop extracts edge location", () => {
     const edge = extractEdgeEvidence({
         'x-77-pop': 'fra'
@@ -112,7 +99,6 @@ test("CDN77 x-77-pop extracts edge location", () => {
     assert.strictEqual(edge.evidenceSource, 'x-77-pop');
 });
 
-// 8. KeyCDN x-edge-location
 test("KeyCDN x-edge-location extracts edge PoP", () => {
     const edge = extractEdgeEvidence({
         'x-edge-location': 'usla'
@@ -122,7 +108,6 @@ test("KeyCDN x-edge-location extracts edge PoP", () => {
     assert.strictEqual(edge.evidenceSource, 'x-edge-location');
 });
 
-// 9. BunnyCDN b-ray
 test("BunnyCDN b-ray extracts edge identifier", () => {
     const edge = extractEdgeEvidence({
         'b-ray': '123456-iad'
@@ -132,7 +117,6 @@ test("BunnyCDN b-ray extracts edge identifier", () => {
     assert.strictEqual(edge.evidenceSource, 'b-ray');
 });
 
-// 10. Remote IP present without any edge PoP headers
 test("Remote IP alone records socket metadata but marks edge location unavailable", () => {
     const edge = extractEdgeEvidence({
         'server': 'Apache'
@@ -148,7 +132,6 @@ test("Remote IP alone records socket metadata but marks edge location unavailabl
     assert.ok(edge.limitations.some(l => l.includes('not exposed')));
 });
 
-// 11. Provider detected but edge location unavailable
 test("Provider detected (e.g. via server or via header) does not imply PoP is known", () => {
     const cdn = detectCdnProvider({
         'server': 'cloudflare'
@@ -165,7 +148,6 @@ test("Provider detected (e.g. via server or via header) does not imply PoP is kn
     assert.strictEqual(edge.availability, 'unavailable');
 });
 
-// 12. Malformed or empty edge headers
 test("Malformed or whitespace-only edge headers are safely ignored", () => {
     const edge = extractEdgeEvidence({
         'cf-ray': '   ',
@@ -178,7 +160,6 @@ test("Malformed or whitespace-only edge headers are safely ignored", () => {
     assert.strictEqual(edge.availability, 'unavailable');
 });
 
-// 13. Decoupling verification: remote IP and edge location remain separate fields
 test("Remote IP and edge location remain strictly separated in evidence schema", () => {
     const edge = extractEdgeEvidence({
         'x-amz-cf-pop': 'LHR50-C1'
